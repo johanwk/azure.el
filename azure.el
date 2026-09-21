@@ -5,7 +5,7 @@
 ;; Keywords: tools, azure
 ;; Package-Requires: ((emacs "28.1") (async-await "1.1") (request "0.3.3") (a "1.0.0") (dash "2.19.1") (s "1.12.0"))
 
-;; Copyright (C) 2024 Henrik Kjerringvåg
+;; Copyright (C) <<year()>> Henrik Kjerringvåg
 ;; 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -112,7 +112,8 @@ In either case, the access-token will be returned base64-encoded."
                  (plstore-put store "basic" nil `(:access-token ,token))
                  (plstore-save store)
                  (plstore-close store)
-                 token))))))
+                 token))))
+   t))
 
 ;; Caching
 
@@ -373,12 +374,21 @@ Optionally, you can pass additional PARAMS, DATA & HEADERS.
 
 
 (defun azure-devops--parse-team-members (data)
-  "Parse team member DATA."
-  (mapcar (lambda (item)
-            (let ((identity (cdr (assoc 'identity item))))
-              (cons (cdr (assoc 'displayName identity))
-                    (cdr (assoc 'imageUrl identity)))))
-          data))
+  "Parse team member DATA into full Azure identities and avatar URLs.
+
+Azure work-item search expects an assignee such as \"Name <login>\",
+not merely the identity's display name."
+  (mapcar
+   (lambda (item)
+     (let* ((identity (cdr (assoc 'identity item)))
+            (display-name (cdr (assoc 'displayName identity)))
+            (unique-name (cdr (assoc 'uniqueName identity)))
+            (search-identity
+             (if (and unique-name (not (string-empty-p unique-name)))
+                 (format "%s <%s>" display-name unique-name)
+               display-name)))
+       (cons search-identity (cdr (assoc 'imageUrl identity)))))
+   data))
 
 (defun azure--team-members (callback)
   "Get a list of members for a specific team and return it through a CALLBACK."

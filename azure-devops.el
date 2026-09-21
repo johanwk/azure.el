@@ -5,7 +5,7 @@
 ;; Keywords: tools, azure, devops
 ;; Package-Requires: ((emacs "28.1") (azure "2022.07.15") (a "1.0.0") (dash "2.19.1") (s "1.12.0") (all-the-icons "5.0.0") (svg-lib "0.2.5"))
 
-;; Copyright (C) 2024 Henrik Kjerringvåg
+;; Copyright (C) <<year()>> Henrik Kjerringvåg
 ;; 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -35,6 +35,9 @@
 (require 's)
 (require 'svg-lib)
 (require 'json)
+(require 'org)
+(require 'seq)
+(require 'url-util)
 
 (defgroup azure-devops nil
   "Azure-devops & org-mode working in symphony"
@@ -189,13 +192,13 @@ Will be increments of `azure-devops-search-results-max`.")
 (defun azure-devops--build-filter-object ()
   "Builds a filter object based on the current filter settings."
   (let ((filter-object (make-hash-table :test 'equal)))
-    (puthash "System.TeamProject" azure-project filter-object)
+    (puthash "System.TeamProject" (list azure-project) filter-object)
     (when azure--keywords
       (puthash "System.Keywords" azure--keywords filter-object))
     (when azure--types
       (puthash "System.WorkItemType" azure--types filter-object))
     (when azure--assignees
-      (puthash "System.AssignedTo" (list azure--assignees) filter-object))
+      (puthash "System.AssignedTo" azure--assignees filter-object))
     (when azure--state
       (puthash "System.State" azure--state filter-object))
     (when azure--area
@@ -266,16 +269,24 @@ for more information."
   (azure-devops--search))
 
 (defun azure-devops--get-available-team-members ()
-  "Get available team-members and allow the user to select multiple."
+  "Fetch team members, then select assignees by their full identities.
+
+Use semicolons to separate multiple selections because Azure display
+names may themselves contain commas."
   (interactive)
-  (unless azure--available-team-members
-    (azure--team-members
-     (lambda (members)
-       (setq azure--available-team-members members))))
-  (let* ((members (mapcar 'car  azure--available-team-members))
-	 (selected-members (completing-read-multiple "Select assignees: " members)))
-    (setq azure--assignees selected-members))
-  (azure-devops--search))
+  (azure--team-members
+   (lambda (members)
+     ;; Refresh on every invocation so a project or team change cannot
+     ;; leave this picker using identities from an earlier selection.
+     (setq azure--available-team-members members)
+     (let* ((crm-separator "[ \t]*;[ \t]*")
+            (identities (mapcar #'car members))
+            (selected
+             (completing-read-multiple
+              "Select assignees (separate multiple with ;): "
+              identities nil t)))
+       (setq azure--assignees selected)
+       (azure-devops--search)))))
 
 (defun azure-devops--menu (type)
   "Open a dynamic menu based on the TYPE of the header."
@@ -402,8 +413,9 @@ for more information."
                                   ("sortOrder" . "DESC"))))
                   ("$skip" . ,skip)
                   ("$top" . ,top)
-		  ("filters" . ,(json-encode filters))
-                  ("includeFacets" . "true"))
+		  ;; `azure-req' JSON-encodes the whole request once.
+                  ("filters" . ,filters)
+                  ("includeFacets" . t))
                 '(("api-version" . "7.1-preview.1")))))
 
 ;; TODO Results buffer [3/8]
@@ -480,10 +492,10 @@ for more information."
 		    (fmt (concat "%." (format "%d" width) "s"))
 		    (title (truncate-string-to-width (s-collapse-whitespace title) width nil 32 "…"))
 		    (face (if (string= assignee azure--user) 'azure-devops-item-mine (azure-devops-face-by-state state)))
-		    (item-type (cond ((s-equals? type "Bug") (all-the-icons-material "bug_report" :face `((t :inherit ,face :weight normal))))
-				     ((s-equals? type "User Story") (all-the-icons-octicon "book" :face `((t :inherit ,face :weight normal))))
-				     ((s-equals? type "Feature") (all-the-icons-octicon "rocket" :face `((t :inherit ,face :weight normal))))
-				     ((s-equals? type "Task") (all-the-icons-octicon "checklist" :face `((t :inherit ,face :weight normal))))
+		    (item-type (cond ((s-equals? type "Bug") (all-the-icons-material "bug_report" :face face))
+				     ((s-equals? type "User Story") (all-the-icons-octicon "book" :face face))
+				     ((s-equals? type "Feature") (all-the-icons-octicon "rocket" :face face))
+				     ((s-equals? type "Task") (all-the-icons-octicon "checklist" :face face))
 				     (t ""))))
 	       (insert (propertize (format "%-10s\t%-8s" id state) 'font-lock-face face))
 	       (insert (propertize (format "\t%s " item-type) 'help-echo (format " %s " type)))
@@ -604,8 +616,15 @@ for more information."
            (while (re-search-forward ":logbook:.+:end:" nil)
              (setq-local check-point (match-end 0))
              (goto-char check-point)))
+         ;; Links are derived from Azure and regenerated on every refresh.
+         ;; Remove the old final section while preserving Personal Notes.
          (save-excursion
-          (while (re-search-forward "* Personal Notes" nil 'noerror)
+           (goto-char (point-min))
+           (when (re-search-forward "^\\* Personal Notes[ \t]*$" nil 'noerror)
+             (when (re-search-forward "^\\* Links[ \t]*$" nil 'noerror)
+               (delete-region (line-beginning-position) (point-max)))))
+         (save-excursion
+          (while (re-search-forward "^\\* Personal Notes[ \t]*$" nil 'noerror)
             (when (length> (buffer-substring-no-properties check-point (- (match-beginning 0) 1)) 1)
               (azure-log this-command "Delete everything from the pointer (line %d) to the personal notes section (line %d)"
                          (line-number-at-pos check-point)
@@ -647,14 +666,18 @@ for more information."
           (t ""))))
 
 (defun azure-devops--work-item-content (work-item)
-  "Return the body (description, repro) of a WORK-ITEM."
+  "Return the body (description and repro steps) of WORK-ITEM."
   (let* ((fields (cdr (assoc 'fields work-item)))
          (description (cdr (assoc 'System.Description fields)))
          (repro (cdr (assoc 'Microsoft.VSTS.TCM.ReproSteps fields))))
-    (azure-log this-command "All fields: %S" fields)
-    (azure-log this-command "Adding description: %s" description)
-    (when description (azure--html-to-org description))
-    (when repro (azure--html-to-org repro))))
+    (s-join
+     "\n\n"
+     (delq nil
+           (list
+            (when description
+              (azure--html-to-org description))
+            (when repro
+              (azure--html-to-org repro)))))))
 
 (defun azure-devops--work-item-comments (comments)
   "Format COMMENTS into a discussions section."
@@ -677,14 +700,278 @@ for more information."
                               (format template id created by text)))
                           comments)))))
 
+(defun azure-devops--relation-work-item-id (relation)
+  "Return the work-item ID addressed by RELATION, or nil.
+
+Relations to commits, attachments, hyperlinks, and other non-work-item
+resources are deliberately ignored."
+  (let ((url (cdr (assoc 'url relation))))
+    (when (and (stringp url)
+               (string-match
+                "/work[Ii]tems/\\([0-9]+\\)\\(?:[?#].*\\)?\\'" url))
+      (string-to-number (match-string 1 url)))))
+
+(defun azure-devops--related-work-items (work-item)
+  "Return a promise for the work-item relations of WORK-ITEM.
+
+Each result is a pair whose car is the relation and whose cadr is the
+linked work item.  Linked work items are fetched so their titles can be
+shown."
+  (let ((relations
+         (seq-filter #'azure-devops--relation-work-item-id
+                     (cdr (assoc 'relations work-item)))))
+    (if (null relations)
+        (promise-resolve nil)
+      (promise-then
+       (promise-all
+        (vconcat
+         (mapcar
+          (lambda (relation)
+            (promise-then
+             (azure-devops--work-item-get
+              (azure-devops--relation-work-item-id relation))
+             (lambda (related) (list relation related))))
+          relations)))
+       (lambda (related) (append related nil))))))
+
+(defun azure-devops--relation-link-type (entry)
+  "Return the displayed Azure relation type for related work-item ENTRY."
+  (let* ((relation (car entry))
+         (attributes (cdr (assoc 'attributes relation))))
+    (or (cdr (assoc 'name attributes))
+        (cdr (assoc 'rel relation))
+        "Related")))
+
+(defun azure-devops--related-work-item-title (entry)
+  "Return a single-line title for related work-item ENTRY."
+  (let* ((work-item (cadr entry))
+         (id (cdr (assoc 'id work-item)))
+         (fields (cdr (assoc 'fields work-item))))
+    (replace-regexp-in-string
+     "[\n\r]+" " "
+     (or (cdr (assoc 'System.Title fields))
+         (format "Work item %s" id)))))
+
+(defun azure-devops--relation-sort-less-p (left right)
+  "Return non-nil when related work-item LEFT should precede RIGHT.
+
+Parents come first, children second, and other relation types follow
+alphabetically.  Entries of the same type are sorted by task title."
+  (let* ((left-type (azure-devops--relation-link-type left))
+         (right-type (azure-devops--relation-link-type right))
+         (left-type-folded (downcase left-type))
+         (right-type-folded (downcase right-type))
+         (left-rank (cond ((string= left-type-folded "parent") 0)
+                          ((string= left-type-folded "child") 1)
+                          (t 2)))
+         (right-rank (cond ((string= right-type-folded "parent") 0)
+                           ((string= right-type-folded "child") 1)
+                           (t 2))))
+    (or (< left-rank right-rank)
+        (and (= left-rank right-rank)
+             (or (string-lessp left-type-folded right-type-folded)
+                 (and (string= left-type-folded right-type-folded)
+                      (string-lessp
+                       (downcase (azure-devops--related-work-item-title left))
+                       (downcase (azure-devops--related-work-item-title right)))))))))
+
+(defun azure-devops--work-item-relations (related-work-items)
+  "Format RELATED-WORK-ITEMS as a sorted Org description list."
+  (if (null related-work-items)
+      ""
+    (concat
+     (mapconcat
+      (lambda (entry)
+        (let* ((work-item (cadr entry))
+               (link-type (azure-devops--relation-link-type entry))
+               (id (cdr (assoc 'id work-item)))
+               (title (azure-devops--related-work-item-title entry)))
+          (format "- %s :: %s"
+                  link-type
+                  (org-link-make-string
+                   (format "azure-work-item:%s" id) title))))
+      (sort (copy-sequence related-work-items)
+            #'azure-devops--relation-sort-less-p)
+      "\n")
+     "\n\n")))
+
+(defun azure-devops--follow-work-item-link (path _argument)
+  "Open the Azure work item identified by link PATH."
+  (unless (string-match-p "\\`[0-9]+\\'" path)
+    (user-error "Invalid Azure work-item ID: %s" path))
+  (azure-devops-work-item (string-to-number path)))
+
+(defun azure-devops--search-result-field (fields name)
+  "Return from FIELDS the value whose field name equals NAME.
+
+Comparison is case-insensitive because Azure's Search API has used
+multiple capitalizations of its field names."
+  (cdr
+   (seq-find
+    (lambda (field)
+      (string-equal (downcase (format "%s" (car field)))
+                    (downcase name)))
+    fields)))
+
+(defun azure-devops--link-search-results (data)
+  "Extract work-item IDs and titles from Azure Search response DATA."
+  (delq
+   nil
+   (mapcar
+    (lambda (item)
+      (let* ((fields (cdr (assoc 'fields item)))
+             (id (or (azure-devops--search-result-field fields "System.Id")
+                     (cdr (assoc 'id item))
+                     (car (mapcar #'cdr fields))))
+             (title (or (azure-devops--search-result-field
+                         fields "System.Title")
+                        (nth 2 (mapcar #'cdr fields)))))
+        (when id
+          (list (format "%s" id)
+                (replace-regexp-in-string
+                 "[\n\r]+" " "
+                 (or title (format "Work item %s" id)))))))
+    (cdr (assoc 'results data)))))
+
+(defun azure-devops--link-search-text (query)
+  "Return Azure Search text for link-completion QUERY.
+
+Plain words become prefix searches, so, for example, `Ontol' matches
+both `ontology' and `Ontology'.  Azure Search performs the matching
+case-insensitively.  Queries using Azure's advanced syntax are left
+unchanged."
+  (let ((query (string-trim query)))
+    (cond
+     ((string-empty-p query) "NOT null")
+     ((string-match-p
+       "\\`[[:alnum:]_-]+\\(?:[[:space:]]+[[:alnum:]_-]+\\)*\\'"
+       query)
+      (mapconcat (lambda (word) (concat word "*"))
+                 (split-string query nil t)
+                 " "))
+     (t query))))
+
+(defun azure-devops--search-work-items-for-link (query success)
+  "Search for QUERY and call SUCCESS with a list of (ID TITLE) pairs.
+
+Plain words in QUERY use case-insensitive prefix matching."
+  (let ((url "https://almsearch.dev.azure.com/{organization}/{project}/_apis/search/workitemsearchresults")
+        (filters (make-hash-table :test 'equal)))
+    (puthash "System.TeamProject" (list azure-project) filters)
+    (azure-post
+     url
+     (cl-function
+      (lambda (&key data &allow-other-keys)
+        (funcall success (azure-devops--link-search-results data))))
+     `(("searchText" . ,(azure-devops--link-search-text query))
+       ("$orderBy" . (( ("field" . "system.id")
+                         ("sortOrder" . "DESC"))))
+       ("$skip" . 0)
+       ("$top" . ,azure-devops-search-results-max)
+       ("filters" . ,filters)
+       ("includeFacets" . t))
+     '(("api-version" . "7.1-preview.1")))))
+
+(defvar azure-devops--work-item-link-titles (make-hash-table :test #'equal)
+  "Titles remembered while completing `azure-work-item' links.")
+
+(defun azure-devops--select-work-item (results)
+  "Prompt for and return one work item from RESULTS.
+
+Each element of RESULTS has the form (ID TITLE)."
+  (unless results
+    (user-error "No matching Azure work items"))
+  (let* ((candidates
+          (mapcar
+           (lambda (item)
+             (cons (format "%s — %s" (car item) (cadr item)) item))
+           results))
+         (choice (completing-read "Work item: " candidates nil t))
+         (item (cdr (assoc choice candidates))))
+    (or item (user-error "No work item selected"))))
+
+(defun azure-devops--insert-selected-work-item-link (marker results)
+  "At MARKER, insert an Azure work-item link selected from RESULTS."
+  (let ((item (azure-devops--select-work-item results)))
+    (unless (and (markerp marker) (marker-buffer marker))
+      (user-error "The buffer for the Azure link no longer exists"))
+    (with-current-buffer (marker-buffer marker)
+      (goto-char marker)
+      (org-insert-link nil
+                       (format "azure-work-item:%s" (car item))
+                       (cadr item)))))
+
+(defun azure-devops--wait-for-link-search (query)
+  "Synchronously return Azure work items matching QUERY.
+
+Org's link completion protocol requires a string return value, so its
+otherwise asynchronous Azure request must finish before completion returns."
+  (let (done results response)
+    (setq response
+          (azure-devops--search-work-items-for-link
+           query
+           (lambda (items)
+             (setq results items
+                   done t))))
+    (while (and (not done)
+                (not (and (request-response-p response)
+                          (request-response-done-p response))))
+      (accept-process-output nil 0.05))
+    (unless done
+      (let ((reason (and (request-response-p response)
+                         (request-response-error-thrown response))))
+        (error "Azure work-item search failed%s"
+               (if reason (format ": %s" reason) ""))))
+    results))
+
+(defun azure-devops--complete-work-item-link (&optional _prefix)
+  "Return an `azure-work-item' link selected with Azure search.
+
+This function implements Org's synchronous `:complete' protocol."
+  (unless (azure--valid-p)
+    (user-error "You need to run `azure-init` first!"))
+  (let* ((query (read-string
+                 "Search Azure work items (empty means all): "))
+         (item (azure-devops--select-work-item
+                (azure-devops--wait-for-link-search query)))
+         (location (format "azure-work-item:%s" (car item))))
+    (puthash location (cadr item) azure-devops--work-item-link-titles)
+    location))
+
+(defun azure-devops--work-item-link-description (location _description)
+  "Return the title remembered for Azure work-item LOCATION."
+  (gethash location azure-devops--work-item-link-titles))
+
+;;;###autoload
+(defun azure-devops-insert-work-item-link (&optional _prefix)
+  "Search Azure DevOps and asynchronously insert a selected work-item link."
+  (interactive "P")
+  (unless (azure--valid-p)
+    (user-error "You need to run `azure-init` first!"))
+  (let ((query (read-string
+                "Search Azure work items (empty means all): "))
+        (marker (copy-marker (point) t)))
+    (azure-devops--search-work-items-for-link
+     query
+     (lambda (results)
+       (azure-devops--insert-selected-work-item-link marker results)))))
+
+(org-link-set-parameters "azure-work-item"
+                         :follow #'azure-devops--follow-work-item-link
+                         :complete #'azure-devops--complete-work-item-link
+                         :insert-description
+                         #'azure-devops--work-item-link-description
+                         :help-echo "Open this work item in Emacs")
+
 ;; We retrieve all the information needed first and if that succeeds,
 ;; we replace everything in our local copy of the issue with what we
 ;; retrieved. Only clocking and personal notes are persisted from the
-;; local copy.
+;; local copy.  The final Links section is regenerated from Azure.
 (async-defun azure-devops--update-work-item-buffer (id)  
   "Update the work-item buffer for the work-item with ID."
   (let* ((work-item (await (azure-devops--work-item-get id)))
          (comments (await (azure-devops--comments id)))
+         (related-work-items (await (azure-devops--related-work-items work-item)))
          (buf (await (azure-devops--create-or-flush-work-item-buffer id)))
          (fields (cdr (assoc 'fields work-item)))
          (filename (format "%s.org" (s-dashed-words (cdr (assoc 'System.Title fields)))))
@@ -705,9 +992,37 @@ for more information."
           (goto-char (match-end 0))))
       (insert (azure-devops--work-item-content work-item))
       (insert (azure-devops--work-item-comments comments))
+      ;; Keep generated navigation outside the prospective synchronized
+      ;; work-item body and below the locally persisted Personal Notes.
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert "\n" (azure-devops--work-item-links
+                       work-item related-work-items))
       (save-buffer)
       (azure-log this-command "Rename file: %s -> %s" (format "%d-Not-yet-updated" id) (format "%d-%s" id filename))
       (rename-visited-file (format "%d-%s" id filename)))))
+
+(defun azure-devops--work-item-web-url (work-item)
+  "Return the Azure DevOps web URL for WORK-ITEM."
+  (or (cdr (assoc 'href
+                  (cdr (assoc 'html
+                              (cdr (assoc '_links work-item))))))
+      (format
+       "https://dev.azure.com/%s/%s/_workitems/edit/%s"
+       (url-hexify-string azure-organization)
+       (url-hexify-string azure-project)
+       (cdr (assoc 'id work-item)))))
+
+(defun azure-devops--work-item-web-link (work-item)
+  "Return an Org link to WORK-ITEM in Azure DevOps."
+  (format "[[%s][Open in Azure DevOps]]\n\n"
+          (azure-devops--work-item-web-url work-item)))
+
+(defun azure-devops--work-item-links (work-item related-work-items)
+  "Return the final Links section for WORK-ITEM and RELATED-WORK-ITEMS."
+  (concat "* Links\n\n"
+          (azure-devops--work-item-web-link work-item)
+          (azure-devops--work-item-relations related-work-items)))
 
 (defun azure-devops-work-item (id)
   "Show the work-item with ID in a buffer of it's own.

@@ -88,25 +88,26 @@ emacs-config, you'll likely want to customize ~azure-access-token-file~.
 
 This is where we store and access the said token.
 #+begin_src emacs-lisp
-(defun azure-access-token ()
-  "Return access-token stored on disk or asks for token if not found.
-In either case, the access-token will be returned base64-encoded."
-  (base64-encode-string
-   (concat ":"
-           (let ((azure-access-token-file (expand-file-name azure-access-token-file))
-                 (this-command "azure-access-token"))
-             (if (file-exists-p azure-access-token-file)
-                 (let* ((store (plstore-open azure-access-token-file))
-                        (_ (azure-log this-command "plstore: \"%s\" was opened" azure-access-token-file))
-                        (plist (plstore-get store "basic")))
+  (defun azure-access-token ()
+    "Return access-token stored on disk or asks for token if not found.
+  In either case, the access-token will be returned base64-encoded."
+    (base64-encode-string
+     (concat ":"
+             (let ((azure-access-token-file (expand-file-name azure-access-token-file))
+                   (this-command "azure-access-token"))
+               (if (file-exists-p azure-access-token-file)
+                   (let* ((store (plstore-open azure-access-token-file))
+                          (_ (azure-log this-command "plstore: \"%s\" was opened" azure-access-token-file))
+                          (plist (plstore-get store "basic")))
+                     (plstore-close store)
+                     (plist-get (cdr plist) :access-token))
+                 (let* ((token (read-from-minibuffer "Personal access-token: "))
+                        (store (plstore-open azure-access-token-file)))
+                   (plstore-put store "basic" nil `(:access-token ,token))
+                   (plstore-save store)
                    (plstore-close store)
-                   (plist-get (cdr plist) :access-token))
-               (let* ((token (read-from-minibuffer "Personal access-token: "))
-                      (store (plstore-open azure-access-token-file)))
-                 (plstore-put store "basic" nil `(:access-token ,token))
-                 (plstore-save store)
-                 (plstore-close store)
-                 token))))))
+                   token))))
+     t))
 #+end_src
 
 ** Caching
@@ -379,12 +380,21 @@ from HTML and org-mode, so that we can work in regular text-documents.
 
 #+begin_src emacs-lisp
 (defun azure-devops--parse-team-members (data)
-  "Parse team member DATA."
-  (mapcar (lambda (item)
-            (let ((identity (cdr (assoc 'identity item))))
-              (cons (cdr (assoc 'displayName identity))
-                    (cdr (assoc 'imageUrl identity)))))
-          data))
+  "Parse team member DATA into full Azure identities and avatar URLs.
+
+Azure work-item search expects an assignee such as \"Name <login>\",
+not merely the identity's display name."
+  (mapcar
+   (lambda (item)
+     (let* ((identity (cdr (assoc 'identity item)))
+            (display-name (cdr (assoc 'displayName identity)))
+            (unique-name (cdr (assoc 'uniqueName identity)))
+            (search-identity
+             (if (and unique-name (not (string-empty-p unique-name)))
+                 (format "%s <%s>" display-name unique-name)
+               display-name)))
+       (cons search-identity (cdr (assoc 'imageUrl identity)))))
+   data))
 
 (defun azure--team-members (callback)
   "Get a list of members for a specific team and return it through a CALLBACK."
