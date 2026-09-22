@@ -30,6 +30,7 @@
 (require 'azure-devops)
 (require 'cl-lib)
 (require 'org)
+(require 'org-colview)
 (require 'seq)
 (require 'subr-x)
 
@@ -382,13 +383,16 @@ point is on a structural heading rather than a work-item heading."
       (azure-devops-outline-mode)
       ;; Apply the file-wide TODO declaration before fontifying headings.
       (org-set-regexps-and-options)
-      (font-lock-flush)
+      (font-lock-flush (point-min) (point-max))
+      (font-lock-ensure (point-min) (point-max))
       ;; Present the snapshot as a table of contents: show every heading while
       ;; keeping their bodies and property drawers folded.
       (org-content)
       (goto-char (point-min))
       (set-buffer-modified-p nil))
-    (pop-to-buffer buffer)
+    ;; Display after the async continuation has returned, so its window-state
+    ;; restoration does not immediately undo `pop-to-buffer'.
+    (run-at-time 0 nil #'pop-to-buffer buffer)
     buffer))
 
 ;;;###autoload

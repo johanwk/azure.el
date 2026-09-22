@@ -60,20 +60,18 @@
   :type 'string)
 
 (defun azure-log (context &rest messages)
-  "Log to `azure-log-buffer` when `azure-debug` is not `nil`.
+  "Log to `azure-log-buffer` when `azure-debug` is non-nil.
 CONTEXT should be a string that lets you know where the message occurred.
 MESSAGES is what you want to log."
-  (let ((trace (backtrace-get-frames 'azure-log)))
-    ;; (message (mapconcat #'identity trace "\n"))
-    (when azure-debug
-      (with-current-buffer (get-buffer-create azure-log-buffer)
-        (read-only-mode -1)
+  (when azure-debug
+    (with-current-buffer (get-buffer-create azure-log-buffer)
+      (let ((inhibit-read-only t))
         (goto-char (point-min))
-        (insert (format "%s %s: %s\n"
-                        (format-time-string azure-log-time-format (current-time))
-                        context
-                        (apply 'format messages)))
-        (read-only-mode 1)))))
+        (insert
+         (format "%s %s: %s\n"
+                 (format-time-string azure-log-time-format)
+                 context
+                 (apply #'format messages)))))))
 
 ;; Token
 
