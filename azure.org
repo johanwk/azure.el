@@ -270,7 +270,7 @@ Note that the API spans multiple hosts; this is just the most common one.")
 ** Request handling
 
 #+begin_src emacs-lisp
-(defun azure-req (method api success &optional params data headers)
+(defun azure-req (method api success &optional params data headers error-handler)
   "Make a request to the Azure API and return it to the passed in SUCCESS-handler.
 <i>Note that instead of using this function directly, you should use
 the helper-functions.  `azure-get` etc.</i>
@@ -281,7 +281,9 @@ API is the path to the resource in Azure's API or a full URL
 
 SUCCESS is the handler that gets the results of the request.
 
-Optionally, you can pass additional PARAMS, DATA & HEADERS.
+Optionally, you can pass additional PARAMS, DATA, HEADERS, and ERROR-HANDLER.
+ERROR-HANDLER receives the keyword arguments supplied by `request'.
+When it is nil, HTTP failures are signaled as errors.
 <i>Note that DATA is treated as json.<i>"
   (progn
     (hack-dir-local-variables-non-file-buffer)
@@ -308,15 +310,17 @@ Optionally, you can pass additional PARAMS, DATA & HEADERS.
 	:parser 'json-read
 	:headers headers
 	:success success
-	:error (cl-function
-		(lambda (&rest args &key error-thrown &allow-other-keys)
-                  (let ((this-command "azure-req-err"))
-                    (azure-log this-command "Arguments when error occurred: %s" args)
-                    (error "%s" error-thrown))))))))
+	:error (or error-handler
+                   (cl-function
+                    (lambda (&rest args &key error-thrown &allow-other-keys)
+                      (let ((this-command "azure-req-err"))
+                        (azure-log this-command "Arguments when error occurred: %s" args)
+                        (error "%s" error-thrown)))))))))
 
-(defun azure-get (api success &optional params)
-  "GET a resource and return it to the success-handler."
-  (azure-req "GET" api success params))
+(defun azure-get (api success &optional params error-handler)
+  "GET a resource and return it to SUCCESS.
+Call ERROR-HANDLER instead of signaling when the request fails."
+  (azure-req "GET" api success params nil nil error-handler))
 
 (defun azure-put (api success &optional params)
   "PUT to a resource and return the result to the success-handler."

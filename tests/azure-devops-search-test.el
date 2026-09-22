@@ -157,6 +157,37 @@
       (azure-devops--follow-work-item-link "796829" nil)
       (should (= opened 796829)))))
 
+(ert-deftest azure-devops-work-item-get-allows-missing-item ()
+  (let (error-handler resolved done)
+    (cl-letf (((symbol-function 'azure-get)
+               (lambda (_api _success _params error)
+                 (setq error-handler error)))
+              ((symbol-function 'request-response-p) (lambda (_) t))
+              ((symbol-function 'request-response-status-code) (lambda (_) 404)))
+      (promise-then
+       (azure-devops--work-item-get 42 t)
+       (lambda (value) (setq resolved value done t)))
+      (funcall error-handler :response 'response :error-thrown '(error http 404))
+      (while (not done)
+        (accept-process-output nil 0.01))
+      (should-not resolved))))
+
+(ert-deftest azure-devops-missing-work-item-shows-friendly-message ()
+  (let (shown done)
+    (cl-letf (((symbol-function 'azure-devops--work-item-get)
+               (lambda (id missing-ok)
+                 (should (= id 42))
+                 (should missing-ok)
+                 (promise-resolve nil)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq shown (apply #'format format-string args)))))
+      (promise-then (azure-devops--update-work-item-buffer 42)
+                    (lambda (_) (setq done t)))
+      (while (not done)
+        (accept-process-output nil 0.01))
+      (should (string-match-p "may have been deleted" shown)))))
+
 (ert-deftest azure-devops-link-search-results-extracts-id-and-title ()
   (let ((data
          '((results

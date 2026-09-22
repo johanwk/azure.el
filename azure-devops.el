@@ -1166,8 +1166,10 @@ and links are untouched."
 ;; local copy.  The final Links section is regenerated from Azure.
 (async-defun azure-devops--update-work-item-buffer (id)  
   "Update the work-item buffer for the work-item with ID."
-  (let* ((work-item (await (azure-devops--work-item-get id)))
-         (comments (await (azure-devops--comments id)))
+  (let ((work-item (await (azure-devops--work-item-get id t))))
+    (if (null work-item)
+        (message "Azure work item %d was not found; it may have been deleted or you may not have permission to view it" id)
+      (let* ((comments (await (azure-devops--comments id)))
          (related-work-items (await (azure-devops--related-work-items work-item)))
          (buf (await (azure-devops--create-or-flush-work-item-buffer id)))
          (fields (cdr (assoc 'fields work-item)))
@@ -1204,7 +1206,7 @@ and links are untouched."
       (save-buffer)
       (azure-log this-command "Rename file: %s -> %s" (format "%d-Not-yet-updated" id) (format "%d-%s" id filename))
       (rename-visited-file (format "%d-%s" id filename))
-      (org-fold-hide-drawer-all))))
+      (org-fold-hide-drawer-all))))))
 
 (defun azure-devops--work-item-web-url (work-item)
   "Return the Azure DevOps web URL for WORK-ITEM."
@@ -1267,21 +1269,35 @@ for more information."
 ;; [[https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item][Get Work Item]]
 
 
-(defun azure-devops--work-item-get (id)
+(defun azure-devops--work-item-get (id &optional missing-ok)
   "Get all relevant information about the work item identified by ID.
+
+When MISSING-OK is non-nil, resolve to nil for an HTTP 404 response instead
+of signaling an error.  Azure uses that response both for deleted work items
+and work items the current user cannot read.
 
 See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
 for more information."
   (promise-new
    (lambda (resolve _reject)
-     (azure-get (format "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/%d" id)
-                (cl-function
-                 (lambda (&key data &allow-other-keys)
-                   (let ((this-command "azure-devops--work-item-get"))
-                    (progn (azure-log this-command "Work item: %S" data)
-                           (funcall resolve data)))))
-                '(("$expand" . "All")
-                  ("api-version" . "7.1-preview.3"))))))
+     (azure-get
+      (format "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/%d" id)
+      (cl-function
+       (lambda (&key data &allow-other-keys)
+         (let ((this-command "azure-devops--work-item-get"))
+           (azure-log this-command "Work item: %S" data)
+           (funcall resolve data))))
+      '(("$expand" . "All")
+        ("api-version" . "7.1-preview.3"))
+      (cl-function
+       (lambda (&rest args &key response error-thrown &allow-other-keys)
+         (let ((status (and (request-response-p response)
+                            (request-response-status-code response))))
+           (azure-log "azure-devops--work-item-get"
+                      "Arguments when error occurred: %s" args)
+           (if (and missing-ok (= (or status 0) 404))
+               (funcall resolve nil)
+             (error "%s" error-thrown)))))))))
 
 (provide 'azure-devops)
 ;;; azure-devops.el ends here
