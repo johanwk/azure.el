@@ -638,11 +638,14 @@ for more information."
          (id (cdr (assoc 'id work-item)))
          (rev (cdr (assoc 'rev work-item)))
          (state (cdr (assoc 'System.State fields)))
+         (assignee (azure-devops--identity-display-name
+                    (cdr (assoc 'System.AssignedTo fields))))
          (created (cdr (assoc 'System.CreatedDate fields)))
          (by (cdr (assoc 'displayName
                          (cdr (assoc 'System.CreatedBy fields))))))
     (azure-log this-command "Adding properties for: %d" id)
-    (format ":properties:\n:id: %d\n:rev: %d\n:state: %s\n:created: %s\n:created-by: %s\n:end:\n" id rev state created by)))
+    (format ":properties:\n:id: %d\n:rev: %d\n:state: %s\n:assignee: %s\n:created: %s\n:created-by: %s\n:end:\n"
+            id rev state assignee created by)))
 
 (defun azure-devops--work-item-title (work-item)
   "Format WORK-ITEM's title and state as an Org heading."

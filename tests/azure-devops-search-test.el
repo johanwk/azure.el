@@ -290,6 +290,19 @@
          (equal (azure-devops--work-item-link-description location nil)
                 "Integration with VIS"))))))
 
+(ert-deftest azure-devops-work-item-properties-include-assignee ()
+  (let ((work-item
+         '((id . 42)
+           (rev . 7)
+           (fields
+            (System.State . "Active")
+            (System.AssignedTo (displayName . "Ada Lovelace"))
+            (System.CreatedDate . "2026-09-22")
+            (System.CreatedBy (displayName . "Grace Hopper")))))))
+    (should (string-match-p
+             "^:assignee: Ada Lovelace$"
+             (azure-devops--work-item-properties work-item)))))
+
 (ert-deftest azure-devops-first-heading-title-excludes-org-metadata ()
   (with-temp-buffer
     (org-mode)
