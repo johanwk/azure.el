@@ -210,11 +210,11 @@ Will be increments of `azure-devops-search-results-max`.")
     (when azure--state
       (puthash "System.State" azure--state filter-object))
     (when azure--area
-      (puthash "System.AreaPath" (list azure--area) filter-object))
+      (puthash "System.AreaPath" azure--area filter-object))
     (when azure--iteration
-      (puthash "System.IterationPath" (list azure--iteration) filter-object))
+      (puthash "System.IterationPath" azure--iteration filter-object))
     (when azure--tags
-      (puthash "System.Tags" (list azure--tags) filter-object))
+      (puthash "System.Tags" azure--tags filter-object))
     filter-object))
 
 (defun azure-devops--clear-all-filters ()
@@ -265,15 +265,134 @@ See the Azure DevOps documentation for the work-item-types List API."
 		  (azure-log this-command "%S" types))))
 	     '(("api-version" . "7.1-preview.2"))))
 
+(defun azure-devops--select-filter-values (prompt values setter)
+  "Select from VALUES using PROMPT, call SETTER, and refresh the search."
+  (let* ((crm-separator "[ \t]*;[ \t]*")
+         (selected (completing-read-multiple prompt values nil t)))
+    (funcall setter selected)
+    (azure-devops--search)))
+
 (defun azure-devops--get-available-types ()
-  "Get available work item types and allow the user to select multiple."
+  "Fetch work item types, then allow the user to select multiple values."
   (interactive)
-  (unless azure--available-types
-    (azure-devops--fetch-work-item-types
-     (lambda (types)
-       (setq azure--available-types types))))
-  (setq azure--types (completing-read-multiple "Select work item types: " azure--available-types))
-  (azure-devops--search))
+  (azure-devops--fetch-work-item-types
+   (lambda (types)
+     (setq azure--available-types types)
+     (azure-devops--select-filter-values
+      "Select work item types (separate multiple with ;): " types
+      (lambda (selected) (setq azure--types selected))))))
+
+(defun azure-devops--parse-states (data)
+  "Return sorted unique state names from Azure state DATA."
+  (sort (delete-dups
+         (delq nil
+               (mapcar (lambda (state) (cdr (assoc 'name state)))
+                       (append data nil))))
+        #'string-lessp))
+
+(defun azure-devops--fetch-states (callback)
+  "Fetch states for every project work-item type and call CALLBACK once."
+  (azure-devops--fetch-work-item-types
+   (lambda (types)
+     (if (null types)
+         (funcall callback nil)
+       (let ((remaining (length types))
+             states)
+         (dolist (type types)
+           (azure-get
+            (format "https://dev.azure.com/{organization}/{project}/_apis/wit/workitemtypes/%s/states"
+                    (url-hexify-string type))
+            (cl-function
+             (lambda (&key data &allow-other-keys)
+               (setq states
+                     (append (azure-devops--parse-states
+                              (cdr (assoc 'value data)))
+                             states))
+               (when (= 0 (cl-decf remaining))
+                 (funcall callback
+                          (sort (delete-dups states) #'string-lessp)))))
+            '(("api-version" . "7.1")))))))))
+
+(defun azure-devops--get-available-states ()
+  "Fetch available states, then allow the user to select multiple values."
+  (interactive)
+  (azure-devops--fetch-states
+   (lambda (states)
+     (azure-devops--select-filter-values
+      "Select states (separate multiple with ;): " states
+      (lambda (selected) (setq azure--state selected))))))
+
+(defun azure-devops--classification-paths (node &optional parent)
+  "Return NODE and descendant classification paths below PARENT.
+Paths are built from node names because API `path' values include the
+classification container (Area or Iteration), unlike work-item field values."
+  (let* ((name (cdr (assoc 'name node)))
+         (current (cond ((and parent name) (concat parent "\\" name))
+                        (name name)
+                        (t parent)))
+         (children (append (cdr (assoc 'children node)) nil)))
+    (append (and current (list current))
+            (apply #'append
+                   (mapcar (lambda (child)
+                             (azure-devops--classification-paths
+                              child current))
+                           children)))))
+
+(defun azure-devops--fetch-classification-paths (kind callback)
+  "Fetch classification nodes of KIND and pass their paths to CALLBACK."
+  (azure-get
+   (format "https://dev.azure.com/{organization}/{project}/_apis/wit/classificationnodes/%s"
+           kind)
+   (cl-function
+    (lambda (&key data &allow-other-keys)
+      (funcall callback (azure-devops--classification-paths data))))
+   '(("$depth" . 20) ("api-version" . "7.1"))))
+
+(defun azure-devops--get-available-areas ()
+  "Fetch area paths, then allow the user to select multiple values."
+  (interactive)
+  (azure-devops--fetch-classification-paths
+   "Areas"
+   (lambda (areas)
+     (azure-devops--select-filter-values
+      "Select areas (separate multiple with ;): " areas
+      (lambda (selected) (setq azure--area selected))))))
+
+(defun azure-devops--get-available-iterations ()
+  "Fetch iteration paths, then allow the user to select multiple values."
+  (interactive)
+  (azure-devops--fetch-classification-paths
+   "Iterations"
+   (lambda (iterations)
+     (azure-devops--select-filter-values
+      "Select iterations (separate multiple with ;): " iterations
+      (lambda (selected) (setq azure--iteration selected))))))
+
+(defun azure-devops--parse-tags (data)
+  "Return sorted tag names from Azure tag DATA."
+  (sort (delq nil
+              (mapcar (lambda (tag) (cdr (assoc 'name tag)))
+                      (append data nil)))
+        #'string-lessp))
+
+(defun azure-devops--fetch-tags (callback)
+  "Fetch project tags and pass them to CALLBACK."
+  (azure-get "https://dev.azure.com/{organization}/{project}/_apis/wit/tags"
+             (cl-function
+              (lambda (&key data &allow-other-keys)
+                (funcall callback
+                         (azure-devops--parse-tags
+                          (cdr (assoc 'value data))))))
+             '(("api-version" . "7.1-preview.1"))))
+
+(defun azure-devops--get-available-tags ()
+  "Fetch available tags, then allow the user to select multiple values."
+  (interactive)
+  (azure-devops--fetch-tags
+   (lambda (tags)
+     (azure-devops--select-filter-values
+      "Select tags (separate multiple with ;): " tags
+      (lambda (selected) (setq azure--tags selected))))))
 
 (defun azure-devops--get-available-team-members ()
   "Fetch team members, then select assignees by their full identities.
@@ -301,10 +420,10 @@ names may themselves contain commas."
   (cond
    ((string= type "type") (azure-devops--get-available-types))
    ((string= type "assignees") (azure-devops--get-available-team-members))
-   ;; ((string= type "state") (azure-devops--get-available-states))
-   ;; ((string= type "area") (azure-devops--get-available-areas))
-   ;; ((string= type "iteration") (azure-devops--get-available-iterations))
-   ;; ((string= type "tags") (azure-devops--get-available-tags))
+   ((string= type "state") (azure-devops--get-available-states))
+   ((string= type "area") (azure-devops--get-available-areas))
+   ((string= type "iteration") (azure-devops--get-available-iterations))
+   ((string= type "tags") (azure-devops--get-available-tags))
    (t (error "Unknown menu type: %s" type))))
 
 (defun azure-devops--search-header-types ()
@@ -394,6 +513,49 @@ names may themselves contain commas."
 #+end_src
 
 #+begin_src emacs-lisp
+(defun azure-devops--clear-unsupported-filter (field)
+  "Clear the selected search filter corresponding to Azure FIELD.
+Return non-nil when FIELD is a filter managed by this package."
+  (pcase (downcase field)
+    ("system.workitemtype" (and azure--types
+                                (progn (setq azure--types nil) t)))
+    ("system.assignedto" (and azure--assignees
+                              (progn (setq azure--assignees nil) t)))
+    ("system.state" (and azure--state
+                         (progn (setq azure--state nil) t)))
+    ("system.areapath" (and azure--area
+                            (progn (setq azure--area nil) t)))
+    ("system.iterationpath" (and azure--iteration
+                                 (progn (setq azure--iteration nil) t)))
+    ("system.tags" (and azure--tags
+                        (progn (setq azure--tags nil) t)))
+    (_ nil)))
+
+(defun azure-devops--search-error (&rest args)
+  "Handle an Azure work-item search failure from request callback ARGS.
+Clear and return its field name for an unavailable search filter.  Signal all
+other failures normally."
+  (let* ((data (plist-get args :data))
+         (response (plist-get args :response))
+         (error-thrown (plist-get args :error-thrown))
+         (status (or (ignore-errors
+                       (request-response-status-code response))
+                     (and (equal (car-safe error-thrown) 'error)
+                          (equal (cadr error-thrown) 'http)
+                          (nth 2 error-thrown))))
+         (server-message (cdr (assoc 'message data)))
+         (field (and (= (or status 0) 400)
+                     server-message
+                     (string-match "[Uu]nknown filter \\[\\([^]]+\\)\\]"
+                                   server-message)
+                     (match-string 1 server-message))))
+    (if (and field (azure-devops--clear-unsupported-filter field))
+        field
+      (error "Azure work-item search failed%s"
+             (if server-message
+                 (format ": %s" server-message)
+               (format ": %s" error-thrown))))))
+
 (defun azure-devops--search (&optional text skip)
   "Query Azure's API for work items.
 
@@ -426,7 +588,15 @@ See the Azure DevOps documentation for the work-item search-results API."
 		  ;; `azure-req' JSON-encodes the whole request once.
                   ("filters" . ,filters)
                   ("includeFacets" . t))
-                '(("api-version" . "7.1-preview.1")))))
+                '(("api-version" . "7.1-preview.1"))
+                nil
+                (lambda (&rest args)
+                  ;; Retry after removing an unsupported filter.  Azure may
+                  ;; reject another selected filter on the next request.
+                  (let ((field (apply #'azure-devops--search-error args)))
+                    (message "Azure Search filter %s is not available for this project; it was cleared"
+                             field)
+                    (azure-devops--search text skip))))))
 #+end_src
 
 *** TODO Results buffer [3/8]

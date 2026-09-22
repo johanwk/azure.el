@@ -333,9 +333,10 @@ Call ERROR-HANDLER instead of signaling when the request fails."
   "PATCH a resource and return the result to the success-handler."
   (azure-req "PATCH" api success params))
 
-(defun azure-post (api success &optional data params headers)
-  "POST a resource and return the result to the success-handler."
-  (azure-req "POST" api success params data headers))
+(defun azure-post (api success &optional data params headers error-handler)
+  "POST a resource and pass its response to SUCCESS.
+Call ERROR-HANDLER instead of signaling when the request fails."
+  (azure-req "POST" api success params data headers error-handler))
 
 ;; Helper functions
 

@@ -45,14 +45,14 @@ native-compile: tangle ## Tangle, then native-compile all Elisp files.
 	$(EMACS) -Q --batch -L . \
 	  --eval "(progn (require 'package) (package-initialize) (mapc #'native-compile '( $(foreach file,$(COMPILE_EL_FILES),\"$(file)\") )))"
 
-test: ## Run all ERT tests, or those matching TEST=REGEXP.
+test: tangle ## Tangle, then run all ERT tests, or those matching TEST=REGEXP.
 	$(EMACS) -Q --batch \
 	  --eval "(progn (require 'package) (package-initialize) (setq load-prefer-newer t))" \
 	  -L . -L tests \
 	  $(TEST_LOAD_ARGS) \
 	  --eval "(ert-run-tests-batch-and-exit (let ((regexp (getenv \"TEST\"))) (if (and regexp (> (length regexp) 0)) regexp t)))"
 
-list-tests: ## List all available ERT tests.
+list-tests: tangle ## Tangle, then list all available ERT tests.
 	@$(EMACS) -Q --batch \
 	  --eval "(progn (require 'package) (package-initialize) (setq load-prefer-newer t))" \
 	  -L . -L tests \

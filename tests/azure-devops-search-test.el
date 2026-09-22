@@ -18,7 +18,7 @@
         (json-array-type 'list)
         captured)
     (cl-letf (((symbol-function 'azure-post)
-               (lambda (_url _success &optional data _params _headers)
+               (lambda (_url _success &optional data _params _headers _error)
                  ;; Mirror the single encoding performed by `azure-req'.
                  (setq captured (json-read-from-string (json-encode data))))))
       (azure-devops--search))
@@ -43,6 +43,190 @@
     (should (hash-table-p filters))
     (should (eq (gethash "System.AssignedTo" filters 'absent) 'absent))))
 
+(ert-deftest azure-devops-search-handles-unsupported-filter ()
+  (let ((azure--iteration '("Example\\Sprint 1")))
+    (should
+     (equal
+      (azure-devops--search-error
+       :data '((message . "Unknown filter [System.IterationPath] found."))
+       :error-thrown '(error http 400))
+      "System.IterationPath"))
+    (should-not azure--iteration)))
+
+(ert-deftest azure-devops-search-still-signals-other-errors ()
+  (should-error
+   (azure-devops--search-error
+    :data '((message . "Service unavailable"))
+    :error-thrown '(error http 503)))
+  ;; Do not retry indefinitely if Azure rejects a field that was not selected.
+  (let ((azure--iteration nil))
+    (should-error
+     (azure-devops--search-error
+      :data '((message . "Unknown filter [System.IterationPath] found."))
+      :error-thrown '(error http 400)))))
+
+(ert-deftest azure-devops-search-retries-after-unsupported-filter ()
+  (let ((azure-project "Example")
+        (azure--keywords nil)
+        (azure--types nil)
+        (azure--assignees nil)
+        (azure--state nil)
+        (azure--area nil)
+        (azure--iteration '("Example\\Sprint 1"))
+        (azure--tags nil)
+        error-handler
+        requests)
+    (cl-letf (((symbol-function 'azure-post)
+               (lambda (_url _success &optional data _params _headers error)
+                 (push data requests)
+                 (setq error-handler error))))
+      (azure-devops--search "query" 0)
+      (let ((first-error-handler error-handler))
+        (funcall first-error-handler
+                 :data '((message . "Unknown filter [System.IterationPath] found."))
+                 :error-thrown '(error http 400)))
+      (should (= (length requests) 2))
+      (should-not azure--iteration)
+      (should
+       (eq (gethash "System.IterationPath"
+                    (cdr (assoc "filters" (car requests))) 'absent)
+           'absent)))))
+
+(ert-deftest azure-devops-search-displays-friendly-unsupported-filter-message ()
+  (let ((azure-project "Example")
+        (azure--keywords nil)
+        (azure--types nil)
+        (azure--assignees nil)
+        (azure--state nil)
+        (azure--area nil)
+        (azure--iteration '("Example"))
+        (azure--tags nil)
+        error-handler
+        shown)
+    (cl-letf (((symbol-function 'azure-post)
+               (lambda (_url _success &optional _data _params _headers error)
+                 (setq error-handler error)))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq shown (apply #'format format-string args)))))
+      (azure-devops--search)
+      (let ((handler error-handler))
+        (funcall handler
+                 :data '((message . "Unknown filter [System.IterationPath] found."))
+                 :error-thrown '(error http 400)))
+      (should (string-match-p "System.IterationPath is not available" shown)))))
+
+(ert-deftest azure-devops-search-removes-successive-unsupported-filters ()
+  (let ((azure-project "Example")
+        (azure--keywords nil)
+        (azure--types nil)
+        (azure--assignees nil)
+        (azure--state nil)
+        (azure--area '("Example"))
+        (azure--iteration '("Example"))
+        (azure--tags nil)
+        error-handler
+        (request-count 0))
+    (cl-letf (((symbol-function 'azure-post)
+               (lambda (_url _success &optional _data _params _headers error)
+                 (cl-incf request-count)
+                 (setq error-handler error))))
+      (azure-devops--search)
+      (let ((handler error-handler))
+        (funcall handler
+                 :data '((message . "Unknown filter [System.IterationPath] found."))
+                 :error-thrown '(error http 400)))
+      (let ((handler error-handler))
+        (funcall handler
+                 :data '((message . "Unknown filter [System.AreaPath] found."))
+                 :error-thrown '(error http 400)))
+      (should (= request-count 3))
+      (should-not azure--iteration)
+      (should-not azure--area))))
+
+(ert-deftest azure-devops-search-list-valued-filters ()
+  (let ((azure-project "Example")
+        (azure--keywords nil)
+        (azure--types nil)
+        (azure--assignees nil)
+        (azure--state '("Active" "New"))
+        (azure--area '("Example\\Platform"))
+        (azure--iteration '("Example\\Sprint 1"))
+        (azure--tags '("Backend" "Urgent")))
+    (let ((filters (azure-devops--build-filter-object)))
+      (should (equal (gethash "System.State" filters) azure--state))
+      (should (equal (gethash "System.AreaPath" filters) azure--area))
+      (should (equal (gethash "System.IterationPath" filters)
+                     azure--iteration))
+      (should (equal (gethash "System.Tags" filters) azure--tags)))))
+
+(ert-deftest azure-devops-parses-filter-values ()
+  (should (equal (azure-devops--parse-states
+                  '(((name . "New")) ((name . "Active"))
+                    ((name . "New"))))
+                 '("Active" "New")))
+  (should (equal (azure-devops--parse-tags
+                  '(((name . "Urgent")) ((name . "Backend"))))
+                 '("Backend" "Urgent")))
+  (should
+   (equal
+    (azure-devops--classification-paths
+     '((name . "Example")
+       (children .
+        [((name . "Platform")
+          (children . [((name . "API"))]))])))
+    '("Example" "Example\\Platform" "Example\\Platform\\API"))))
+
+(ert-deftest azure-devops-fetch-classification-paths-uses-depth ()
+  (let (url params callback-value)
+    (cl-letf (((symbol-function 'azure-get)
+               (lambda (api success request-params)
+                 (setq url api params request-params)
+                 (funcall success
+                          :data '((name . "Example")
+                                  (children . [((name . "Platform"))]))))))
+      (azure-devops--fetch-classification-paths
+       "Areas" (lambda (value) (setq callback-value value)))
+      (should (string-suffix-p "/classificationnodes/Areas" url))
+      (should (equal params '(("$depth" . 20) ("api-version" . "7.1"))))
+      (should (equal callback-value '("Example" "Example\\Platform"))))))
+
+(ert-deftest azure-devops-menu-dispatches-all-filter-types ()
+  (let (called)
+    (cl-letf (((symbol-function 'azure-devops--get-available-types)
+               (lambda () (push 'type called)))
+              ((symbol-function 'azure-devops--get-available-team-members)
+               (lambda () (push 'assignees called)))
+              ((symbol-function 'azure-devops--get-available-states)
+               (lambda () (push 'state called)))
+              ((symbol-function 'azure-devops--get-available-areas)
+               (lambda () (push 'area called)))
+              ((symbol-function 'azure-devops--get-available-iterations)
+               (lambda () (push 'iteration called)))
+              ((symbol-function 'azure-devops--get-available-tags)
+               (lambda () (push 'tags called))))
+      (dolist (type '("type" "assignees" "state" "area" "iteration" "tags"))
+        (azure-devops--menu type))
+      (should (equal (nreverse called)
+                     '(type assignees state area iteration tags))))))
+
+(ert-deftest azure-devops-fetch-states-combines-work-item-types ()
+  (let (requests result)
+    (cl-letf (((symbol-function 'azure-devops--fetch-work-item-types)
+               (lambda (callback) (funcall callback '("Task" "Bug"))))
+              ((symbol-function 'azure-get)
+               (lambda (url success _params)
+                 (push url requests)
+                 (funcall success
+                          :data (if (string-match-p "Task/states" url)
+                                    '((value . [((name . "New"))
+                                                ((name . "Active"))]))
+                                  '((value . [((name . "New"))
+                                              ((name . "Closed"))])))))))
+      (azure-devops--fetch-states (lambda (states) (setq result states)))
+      (should (= (length requests) 2))
+      (should (equal result '("Active" "Closed" "New"))))))
+
 (ert-deftest azure-devops-parse-team-members-preserves-full-identity ()
   (let ((data '(((identity
                   (displayName . "Klüwer, Johan Wilhelm")
@@ -52,6 +236,40 @@
      (equal (azure-devops--parse-team-members data)
             '(("Klüwer, Johan Wilhelm <johan@example.org>"
                . "https://example.org/avatar"))))))
+
+(ert-deftest azure-devops-filter-picker-uses-semicolons ()
+  (let (selected searched)
+    (cl-letf (((symbol-function 'completing-read-multiple)
+               (lambda (_prompt values &rest _)
+                 (should (equal crm-separator "[ \t]*;[ \t]*"))
+                 (should (equal values '("One" "Two")))
+                 '("Two")))
+              ((symbol-function 'azure-devops--search)
+               (lambda (&rest _) (setq searched t))))
+      (azure-devops--select-filter-values
+       "Select: " '("One" "Two")
+       (lambda (values) (setq selected values)))
+      (should (equal selected '("Two")))
+      (should searched))))
+
+(ert-deftest azure-devops-type-picker-waits-for-results ()
+  (let ((azure--types nil)
+        callback picker-called searched)
+    (cl-letf (((symbol-function 'azure-devops--fetch-work-item-types)
+               (lambda (function) (setq callback function)))
+              ((symbol-function 'azure-devops--select-filter-values)
+               (lambda (_prompt values setter)
+                 (setq picker-called values)
+                 (funcall setter '("Task"))))
+              ((symbol-function 'azure-devops--search)
+               (lambda (&rest _) (setq searched t))))
+      (azure-devops--get-available-types)
+      (should-not picker-called)
+      (funcall callback '("Bug" "Task"))
+      (should (equal picker-called '("Bug" "Task")))
+      (should (equal azure--types '("Task")))
+      ;; The shared picker normally performs this refresh; it is mocked above.
+      (should-not searched))))
 
 (ert-deftest azure-devops-assignee-picker-waits-and-preserves-commas ()
   (let ((members '(("Klüwer, Johan Wilhelm <johan@example.org>" . "avatar")
