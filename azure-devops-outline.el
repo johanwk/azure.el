@@ -48,7 +48,7 @@
 (defcustom azure-devops-outline-batch-size 200
   "Maximum number of work items fetched in one batch request."
   :group 'azure-devops-outline
-  :type '(integer :tag "Batch size" 1))
+  :type '(integer :tag "Batch size"))
 
 (defcustom azure-devops-outline-columns-format
   "%45ITEM(Task) %12AZURE_TYPE(Type) %12AZURE_STATE(State) %28AZURE_ASSIGNEE(Assignee) %10AZURE_ID(ID)"

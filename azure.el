@@ -170,22 +170,25 @@ Note that if you change this directory, you'll need to re-run azure-init."
   :type 'string)
 
 (defcustom azure-organization nil
-  "The name of the Azure DevOps organization."
+  "The name of the Azure DevOps organization, or nil when unset."
   :group 'azure
-  :type 'string)
+  :type '(choice (const :tag "Unset" nil) string))
 
 (defcustom azure-project nil
-  "Project ID or project name."
+  "Project ID or project name, or nil when unset."
   :group 'azure
-  :type 'string)
+  :type '(choice (const :tag "Unset" nil) string))
 
 (defcustom azure-team nil
-  "Team ID or team name."
+  "Team ID or team name, or nil when unset."
   :group 'azure
-  :type 'string)
+  :type '(choice (const :tag "Unset" nil) string))
 
 (defcustom azure-debug nil
-  "Wether to output debug-information.  Only relevant to contributors.")
+  "Whether to output debugging information.
+This option is primarily useful to contributors."
+  :group 'azure
+  :type 'boolean)
 
 (defconst azure-api-version "6.0"
   "Fallback version of the Azure-API to use if not set per request.")
@@ -271,7 +274,7 @@ Note that the API spans multiple hosts; this is just the most common one.")
 
 
 (defun azure-req (method api success &optional params data headers error-handler)
-  "Make a request to the Azure API and return it to the passed in SUCCESS-handler.
+  "Make a request to the Azure API and pass its response to SUCCESS.
 <i>Note that instead of using this function directly, you should use
 the helper-functions.  `azure-get` etc.</i>
 
@@ -423,7 +426,7 @@ hard-line-break markers."
   "Select a project from a list of all the projects in the
    organization that the authenticated user has access to.
 
-   See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/core/projects/list'
+   See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/core/projects/list'
    for more information."
   (promise-new
    (lambda (resolve _reject)
@@ -462,7 +465,7 @@ not merely the identity's display name."
    data))
 
 (defun azure--team-members (callback)
-  "Get a list of members for a specific team and return it through a CALLBACK."
+  "Get members of a specific team and pass them to CALLBACK."
 
   (azure-get "https://dev.azure.com/{organization}/_apis/projects/{project}/teams/{team}/members"
              (cl-function
@@ -477,7 +480,7 @@ not merely the identity's display name."
   "Select a team from a list of all the teams in the
    organization that the authenticated user has access to.
 
-   See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/core/teams/get-all-teams'
+   See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/core/teams/get-all-teams'
    for more information."
   (promise-new
    (let ((url "https://dev.azure.com/{organization}/_apis/teams"))
@@ -505,7 +508,7 @@ not merely the identity's display name."
 ;; initialization over and over.
 
 (defun azure--save-dir-locals ()
-  "Creates or modifies .dir-locals.el with preferences required by azure.el."
+  "Create or modify .dir-locals.el with settings required by azure.el."
   (when (read-answer
          (concat
           (propertize "Would you like to save these settings to " 'face '(default))

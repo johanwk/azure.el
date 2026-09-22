@@ -40,6 +40,12 @@
 (require 'seq)
 (require 'url-util)
 
+(declare-function org-element-map "org-element"
+                  (data types fun &optional info first-match no-recursion
+                        with-affiliated))
+(declare-function org-element-parse-buffer "org-element"
+                  (&optional granularity visible-only))
+
 (defgroup azure-devops nil
   "Azure-devops & org-mode working in symphony"
   :prefix "azure-devops-"
@@ -51,23 +57,23 @@
 
 
 (defcustom azure-devops-search-latest-atop t
-  "Wether to order the search-results with the latest entry first or last."
+  "Whether to put the latest search result first."
   :group 'azure
   :type 'boolean)
 
 (defcustom azure-devops-discussion-latest-atop nil
-  "Wether to order the thread of discussion with the latest comment first or last."
+  "Whether to put the latest discussion comment first."
   :group 'azure
   :type 'boolean)
 
 (defcustom azure-devops-search-show-header t
-  "Wether to show or hide the header in the search-results buffer."
+  "Whether to show the header in the search-results buffer."
   :group 'azure
   :type 'boolean)
 
 (defcustom azure-devops-search-results-max 200
-  "Maximum number of results returned when searching for work-items.
-   Note that <b>200</b> is the maximum supported by Azure's API."
+  "Maximum number of results returned when searching for work items.
+Azure's API supports at most 200 results."
   :group 'azure
   :type 'natnum)
 
@@ -252,8 +258,7 @@ Will be increments of `azure-devops-search-results-max`.")
 (defun azure-devops--fetch-work-item-types (callback)
   "Fetch available work item types.
 
-See URL: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-item-types/list?view=azure-devops-rest-7.1
-for more information."
+See the Azure DevOps documentation for the work-item-types List API."
   (azure-get "https://dev.azure.com/{organization}/{project}/_apis/wit/workitemtypes"
 	     (cl-function
 	      (lambda (&key data &allow-other-keys)
@@ -392,8 +397,7 @@ names may themselves contain commas."
 (defun azure-devops--search (&optional text skip)
   "Query Azure's API for work items.
 
-See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/search/work-item-search-results/fetch-work-item-search-results'
-for more information."
+See the Azure DevOps documentation for the work-item search-results API."
   (let ((url "https://almsearch.dev.azure.com/{organization}/{project}/_apis/search/workitemsearchresults")
         (top (min (max 0 azure-devops-search-results-max) 200))
         (skip (or skip 0))
@@ -545,7 +549,7 @@ for more information."
 
 
 (defun azure-devops--comments (id)
-  ""
+  "Return a promise resolving to the comments for work item ID."
   (promise-new
    (lambda (resolve _reject)
      (let ((url (format "https://dev.azure.com/{organization}/{project}/_apis/wit/workItems/%d/comments" id)))
@@ -584,9 +588,8 @@ for more information."
     (expand-file-name (format "%d-*.org" id) azure-cache-directory))))
 
 (defun azure-devops--create-or-flush-work-item-buffer (id)
-  "Open the file associated with the work-item with ID and update it's content.
-
-   If a file does not exist, a new one will be created."
+  "Open the file for work item ID and update its content.
+If the file does not exist, create it."
   (promise-new
    (lambda (resolve _reject)
      (let ((logbook-p nil)
@@ -957,8 +960,8 @@ perform incremental narrowing."
 (defun azure-devops--wait-for-link-search (query)
   "Synchronously return Azure work items matching QUERY.
 
-Org's link completion protocol requires a string return value, so its
-otherwise asynchronous Azure request must finish before completion returns."
+Org's link completion protocol requires a string return value.  Therefore,
+the asynchronous Azure request must finish before completion returns."
   (let (done results response)
     (setq response
           (azure-devops--search-work-items-for-link
@@ -1240,8 +1243,7 @@ When called interactively, retrieve the current work-item list immediately
 and offer completion candidates showing state, assignee, title, and ID.
 Typing in the completion interface narrows that list incrementally.
 
-See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
-for more information."
+See the Azure DevOps documentation for the work-items Get API."
   (interactive (list (azure-devops--read-work-item-id)))
   (azure-log this-command "Show work-item with id: %S" id)
   (funcall 'azure-devops--update-work-item-buffer id))
@@ -1279,8 +1281,7 @@ When MISSING-OK is non-nil, resolve to nil for an HTTP 404 response instead
 of signaling an error.  Azure uses that response both for deleted work items
 and work items the current user cannot read.
 
-See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
-for more information."
+See the Azure DevOps documentation for the work-items Get API."
   (promise-new
    (lambda (resolve _reject)
      (azure-get
