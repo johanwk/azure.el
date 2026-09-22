@@ -26,6 +26,7 @@ org-mode, so clocking in etc works as you would expect.
 (require 's)
 (require 'svg-lib)
 (require 'json)
+(require 'crm)
 (require 'org)
 (require 'seq)
 (require 'url-util)
@@ -394,7 +395,7 @@ names may themselves contain commas."
 See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/search/work-item-search-results/fetch-work-item-search-results'
 for more information."
   (let ((url "https://almsearch.dev.azure.com/{organization}/{project}/_apis/search/workitemsearchresults")
-        (top (math-min (math-max 0 azure-devops-search-results-max) 200))
+        (top (min (max 0 azure-devops-search-results-max) 200))
         (skip (or skip 0))
         (text (if (null text) azure-devops--query text))
 	(filters (azure-devops--build-filter-object)))

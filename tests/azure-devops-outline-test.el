@@ -34,9 +34,12 @@
       (let ((promise (azure-devops-outline--fetch-batch '(1 2))))
         (funcall success-callback
                  :data '((value . [((id . 1)) ((id . 2))])))
-        (should
-         (equal (promise-wait 1 promise)
-                '(:fullfilled (((id . 1)) ((id . 2))))))))))
+        (let (resolved)
+          (promise-then promise (lambda (value) (setq resolved value)))
+          (while (null resolved)
+            (accept-process-output nil 0.01))
+          (should (equal resolved
+                         '(((id . 1)) ((id . 2))))))))))
 
 (ert-deftest azure-devops-outline-renders-hierarchy-and-unlinked-items ()
   (let* ((azure-project "Example")
@@ -119,6 +122,21 @@
     (insert "* Work-item hierarchy\n")
     (goto-char (point-min))
     (should-error (azure-devops-outline-open-at-point)
+                  :type 'user-error)))
+
+(ert-deftest azure-devops-outline-offers-initialization ()
+  (let (initialized)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+              ((symbol-function 'azure-init)
+               (lambda ()
+                 (setq initialized t)
+                 (promise-resolve t))))
+      (should (azure-devops-outline--offer-initialization))
+      (should initialized))))
+
+(ert-deftest azure-devops-outline-declined-initialization-errors ()
+  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+    (should-error (azure-devops-outline--offer-initialization)
                   :type 'user-error)))
 
 ;;; azure-devops-outline-test.el ends here

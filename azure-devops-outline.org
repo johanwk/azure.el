@@ -382,16 +382,32 @@ point is on a structural heading rather than a work-item heading."
       (goto-char (point-min))
       (set-buffer-modified-p nil))
     ;; Display after the async continuation has returned, so its window-state
-    ;; restoration does not immediately undo `pop-to-buffer'.
-    (run-at-time 0 nil #'pop-to-buffer buffer)
+    ;; restoration does not immediately undo `pop-to-buffer'.  The buffer may
+    ;; have been killed before the timer runs (for example, by a caller or test).
+    (run-at-time 0 nil
+                 (lambda (buffer)
+                   (when (buffer-live-p buffer)
+                     (pop-to-buffer buffer)))
+                 buffer)
     buffer))
+
+(defun azure-devops-outline--offer-initialization ()
+  "Offer to initialize Azure and return its initialization promise.
+Signal a `user-error' when the user declines."
+  (if (yes-or-no-p
+       "Azure is not initialized; work items cannot be retrieved.  Run `azure-init' now? ")
+      (azure-init)
+    (user-error "Cannot retrieve Azure work items without initialization")))
 
 ;;;###autoload
 (async-defun azure-devops-work-item-outline ()
   "Display all project work items as a read-only Org hierarchy snapshot."
   (interactive)
   (unless (azure--valid-p)
-    (user-error "You need to run `azure-init` first!"))
+    (await (azure-devops-outline--offer-initialization)))
+  ;; Initialization can be aborted before all three values have been selected.
+  (unless (azure--valid-p)
+    (user-error "Azure initialization did not set organization, project, and team"))
   (message "Retrieving Azure work-item hierarchy...")
   (let* ((responses (await
                      (promise-all
