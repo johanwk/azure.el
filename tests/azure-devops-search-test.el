@@ -259,4 +259,114 @@
          (equal (azure-devops--work-item-link-description location nil)
                 "Integration with VIS"))))))
 
+(ert-deftest azure-devops-first-heading-title-excludes-org-metadata ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* TODO [#A] Updated task title :azure:\nBody.\n")
+    (should (equal (azure-devops--first-heading-title)
+                   "Updated task title"))))
+
+(ert-deftest azure-devops-first-heading-description-uses-heading-body ()
+  (with-temp-buffer
+    (org-mode)
+    (insert ":PROPERTIES:\n:ID: 42\n:REV: 7\n:END:\n\n"
+            "* TODO Example\n"
+            "First paragraph.\n\n"
+            "- item\n\n"
+            "** Description subheading\nNested description.\n\n"
+            "* Discussion (1)\nNot part of the description.\n")
+    (should
+     (equal (azure-devops--first-heading-description)
+            (concat "First paragraph.\n\n- item\n\n"
+                    "** Description subheading\nNested description.")))))
+
+(ert-deftest azure-devops-update-title-description-and-state-sends-json-patch ()
+  (with-temp-buffer
+    (org-mode)
+    (insert ":PROPERTIES:\n:ID: 42\n:REV: 7\n:STATE: New\n:END:\n"
+            "#+TODO: NEW ACTIVE | RESOLVED CLOSED REMOVED\n\n"
+            "* ACTIVE Updated task title\n"
+            "Updated *description*.\n\n"
+            "* Discussion (0)\n\n"
+            "* Personal Notes\nLocal only.\n")
+    (org-set-regexps-and-options)
+    (let ((azure-organization "Example")
+          (azure-project "Project")
+          (azure-team "Team")
+          captured)
+      (cl-letf (((symbol-function 'azure--org-to-html)
+                 (lambda (description)
+                   (should (equal description "Updated *description*."))
+                   "<p>Updated <strong>description</strong>.</p>"))
+                ((symbol-function 'azure-req)
+                 (lambda (method api success params data headers)
+                   (setq captured
+                         (list method api params data headers))
+                   (funcall success :data '((rev . 8)))
+                   'request)))
+        (should (eq (azure-devops-update-work-item-description) 'request))
+        (should (equal (nth 0 captured) "PATCH"))
+        (should (equal (nth 1 captured)
+                       "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/42"))
+        (should (equal (nth 2 captured) '(("api-version" . "7.1"))))
+        (should
+         (equal
+          (nth 3 captured)
+          '((("op" . "test") ("path" . "/rev") ("value" . 7))
+            (("op" . "add")
+             ("path" . "/fields/System.Title")
+             ("value" . "Updated task title"))
+            (("op" . "add")
+             ("path" . "/fields/System.Description")
+             ("value" . "<p>Updated <strong>description</strong>.</p>"))
+            (("op" . "add")
+             ("path" . "/fields/System.State")
+             ("value" . "Active")))))
+        (should
+         (equal (nth 4 captured)
+                '(("Content-Type" . "application/json-patch+json"))))
+        (should (equal (azure-devops--document-property "rev") "8"))
+        (should (equal (azure-devops--document-property "state") "Active"))))))
+
+(ert-deftest azure-devops-update-without-todo-leaves-state-unchanged ()
+  (with-temp-buffer
+    (org-mode)
+    (insert ":PROPERTIES:\n:ID: 42\n:REV: 7\n:STATE: New\n:END:\n"
+            "#+TODO: NEW ACTIVE | RESOLVED CLOSED REMOVED\n\n"
+            "* Updated task title\nDescription.\n")
+    (org-set-regexps-and-options)
+    (let ((azure-organization "Example")
+          (azure-project "Project")
+          (azure-team "Team")
+          captured)
+      (cl-letf (((symbol-function 'azure--org-to-html) #'identity)
+                ((symbol-function 'azure-req)
+                 (lambda (_method _api success _params data _headers)
+                   (setq captured data)
+                   (funcall success :data '((rev . 8)))
+                   'request)))
+        (azure-devops-update-work-item-description)
+        (should-not
+         (seq-find (lambda (operation)
+                     (equal (cdr (assoc "path" operation))
+                            "/fields/System.State"))
+                   captured))
+        (should (equal (azure-devops--document-property "state") "New"))))))
+
+(ert-deftest azure-devops-work-item-title-uses-azure-state-keyword ()
+  (let ((work-item '((fields (System.State . "Resolved")
+                              (System.Title . "Example task")))))
+    (should (equal azure-devops-work-item-todo-directive
+                   "#+TODO: NEW ACTIVE | RESOLVED CLOSED REMOVED\n"))
+    (should (equal (azure-devops--work-item-title work-item)
+                   "* RESOLVED Example task\n"))))
+
+(ert-deftest azure-devops-first-heading-state-allows-no-keyword ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+TODO: NEW ACTIVE | RESOLVED CLOSED REMOVED\n\n"
+            "* Task without a state keyword\n")
+    (org-set-regexps-and-options)
+    (should-not (azure-devops--first-heading-state))))
+
 ;;; azure-devops-search-test.el ends here

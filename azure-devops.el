@@ -92,16 +92,17 @@
   :group 'azure
   :type 'string)
 
-(defvar azure-devops-mapping-states
-  '(("New" . "")
-    ("To Do" . "")
-    ("Active" . "TODO")
-    ("Doing" . "TODO")
-    ("Done" . "DONE")
-    ("Resolved" . "DONE")
-    ("Closed" . "DONE")
+(defconst azure-devops-work-item-todo-directive
+  "#+TODO: NEW ACTIVE | RESOLVED CLOSED REMOVED\n"
+  "Org TODO configuration used in individual work-item buffers.")
+
+(defconst azure-devops-mapping-states
+  '(("New" . "NEW")
+    ("Active" . "ACTIVE")
+    ("Resolved" . "RESOLVED")
+    ("Closed" . "CLOSED")
     ("Removed" . "REMOVED"))
-  "Align work-item states with TODO-states of org-mode.")
+  "Map supported Azure work-item states to Org TODO keywords.")
 
 ;; Menus and bindings
 
@@ -142,6 +143,9 @@
   "When querying for work-items, this is the number of work-items that
 will be skipped. Used internally for pagination.
 Will be increments of `azure-devops-search-results-max`.")
+
+(defvar azure-devops--query ""
+  "Current work-item search query, retained while filtering or paging.")
 
 ;; Faces
 
@@ -291,14 +295,14 @@ names may themselves contain commas."
 (defun azure-devops--menu (type)
   "Open a dynamic menu based on the TYPE of the header."
   (interactive)
-  (let ((items (cond
-                ((string= type "type") (azure-devops--get-available-types))
-                ((string= type "assignees") (azure-devops--get-available-team-members))
-                ;; ((string= type "state") (azure-devops--get-available-states))
-                ;; ((string= type "area") (azure-devops--get-available-areas))
-                ;; ((string= type "iteration") (azure-devops--get-available-iterations))
-                ;; ((string= type "tags") (azure-devops--get-available-tags))
-                (t (error "Unknown type")))))))
+  (cond
+   ((string= type "type") (azure-devops--get-available-types))
+   ((string= type "assignees") (azure-devops--get-available-team-members))
+   ;; ((string= type "state") (azure-devops--get-available-states))
+   ;; ((string= type "area") (azure-devops--get-available-areas))
+   ;; ((string= type "iteration") (azure-devops--get-available-iterations))
+   ;; ((string= type "tags") (azure-devops--get-available-tags))
+   (t (error "Unknown menu type: %s" type))))
 
 (defun azure-devops--search-header-types ()
   "Tap the types-name in the header-line to change it."
@@ -385,13 +389,14 @@ names may themselves contain commas."
              (string-to-number))))))
 
 (defun azure-devops--search (&optional text skip)
-  "Query azure's API for work-items.
+  "Query Azure's API for work items.
 
-   See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/search/work-item-search-results/fetch-work-item-search-results'
-   for more information."
+See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/search/work-item-search-results/fetch-work-item-search-results'
+for more information."
   (let ((url "https://almsearch.dev.azure.com/{organization}/{project}/_apis/search/workitemsearchresults")
         (top (math-min (math-max 0 azure-devops-search-results-max) 200))
         (skip (or skip 0))
+        (text (if (null text) azure-devops--query text))
 	(filters (azure-devops--build-filter-object)))
     (azure-post url
                 (cl-function
@@ -465,13 +470,8 @@ names may themselves contain commas."
                 show-trailing-whitespace nil)))
 
 (defun azure-devops--update-search-buffer ()
-  "Update the search-buffer with WORK-ITEMS."
+  "Update the search buffer with the current work items."
   (let ((buf (get-buffer (azure-devops--buffer-name azure-devops-search-buffer)))
-	(map (azure-devops--define-mouse-key
-	      (lambda ()
-		(let* ((work-item (azure-devops-search-selected))
-		       (id (cdr (assoc 'id work-item))))
-		  (azure-devops-work-item id)))))
 	(this-command "azure-devops--update-search-buffer"))
     (azure-log this-command "Work items: %S" azure-devops--work-items)
     (with-current-buffer buf
@@ -484,29 +484,26 @@ names may themselves contain commas."
 	  (delete-region (point-min) (point-max)))
 	(goto-line azure-devops--skipped)
 	(beginning-of-line (if (> azure-devops--skipped 0) 1 0))
-	(mapcar
-	 (lambda (item)
-	   (pcase-let
-	       ((`(,id ,type ,title ,assignee ,state ,tags ,_ ,created ,changed) item))
-	     (let* ((width (max 50 (- (window-width) 60 (string-width "\t\t\t\t"))))
-		    (fmt (concat "%." (format "%d" width) "s"))
-		    (title (truncate-string-to-width (s-collapse-whitespace title) width nil 32 "…"))
-		    (face (if (string= assignee azure--user) 'azure-devops-item-mine (azure-devops-face-by-state state)))
-		    (item-type (cond ((s-equals? type "Bug") (all-the-icons-material "bug_report" :face face))
-				     ((s-equals? type "User Story") (all-the-icons-octicon "book" :face face))
-				     ((s-equals? type "Feature") (all-the-icons-octicon "rocket" :face face))
-				     ((s-equals? type "Task") (all-the-icons-octicon "checklist" :face face))
-				     (t ""))))
-	       (insert (propertize (format "%-10s\t%-8s" id state) 'font-lock-face face))
-	       (insert (propertize (format "\t%s " item-type) 'help-echo (format " %s " type)))
-	       (insert (propertize (format "%s\t" title) 'font-lock-face face))
-	       (when (s-present? tags)
-		 (--map (insert-image (apply 'svg-lib-tag it
-					     '(svg-lib-style-compute-default)
-					     azure-devops-item-tags))
-			(s-split ";" tags)))
-	       (insert (propertize "\n" 'font-lock-face face)))))
-	 azure-devops--work-items)
+	(dolist (item azure-devops--work-items)
+	  (pcase-let
+	      ((`(,id ,type ,title ,assignee ,state ,tags . ,_) item))
+	    (let* ((width (max 50 (- (window-width) 60 (string-width "\t\t\t\t"))))
+		   (title (truncate-string-to-width (s-collapse-whitespace title) width nil 32 "…"))
+		   (face (if (string= assignee azure--user) 'azure-devops-item-mine (azure-devops-face-by-state state)))
+		   (item-type (cond ((s-equals? type "Bug") (all-the-icons-material "bug_report" :face face))
+				    ((s-equals? type "User Story") (all-the-icons-octicon "book" :face face))
+				    ((s-equals? type "Feature") (all-the-icons-octicon "rocket" :face face))
+				    ((s-equals? type "Task") (all-the-icons-octicon "checklist" :face face))
+				    (t ""))))
+	      (insert (propertize (format "%-10s\t%-8s" id state) 'font-lock-face face))
+	      (insert (propertize (format "\t%s " item-type) 'help-echo (format " %s " type)))
+	      (insert (propertize (format "%s\t" title) 'font-lock-face face))
+	      (when (s-present? tags)
+		(dolist (tag (s-split ";" tags))
+		  (insert-image (apply #'svg-lib-tag tag
+				       '(svg-lib-style-compute-default)
+				       azure-devops-item-tags))))
+	      (insert (propertize "\n" 'font-lock-face face)))))
 	(setq inhibit-read-only nil)))))
 
 (defun azure-devops-search-skip ()
@@ -515,7 +512,7 @@ names may themselves contain commas."
     (let ((skip (+ azure-devops--skipped azure-devops-search-results-max)))
       (azure-log this-command "Reached the end of the search-buffer")
       (setq azure-devops--skipped skip)
-      (azure-devops--search query skip))))
+      (azure-devops--search azure-devops--query skip))))
 
 (add-hook 'post-command-hook 'azure-devops-search-skip)
 
@@ -539,6 +536,7 @@ names may themselves contain commas."
   (azure-devops--setup-search-buffer)
   (azure-devops-search-mode)
   (azure--set-user)
+  (setq azure-devops--query query)
   (azure-devops--search query)
   (run-mode-hooks 'azure-devops-search-mode-hook))
 
@@ -614,7 +612,7 @@ names may themselves contain commas."
          (when logbook-p
            (azure-log this-command "Move pointer to after the logbook entry")
            (while (re-search-forward ":logbook:.+:end:" nil)
-             (setq-local check-point (match-end 0))
+             (setq check-point (match-end 0))
              (goto-char check-point)))
          ;; Links are derived from Azure and regenerated on every refresh.
          ;; Remove the old final section while preserving Personal Notes.
@@ -646,12 +644,15 @@ names may themselves contain commas."
     (format ":properties:\n:id: %d\n:rev: %d\n:state: %s\n:created: %s\n:created-by: %s\n:end:\n" id rev state created by)))
 
 (defun azure-devops--work-item-title (work-item)
-  "Formats the WORK-ITEM title into an `org-mode` heading."
+  "Format WORK-ITEM's title and state as an Org heading."
   (let* ((fields (cdr (assoc 'fields work-item)))
-         (state (s-trim (cdr (assoc (cdr (assoc 'System.State fields)) azure-devops-mapping-states))))
+         (azure-state (cdr (assoc 'System.State fields)))
+         (todo-keyword (cdr (assoc azure-state azure-devops-mapping-states)))
          (title (cdr (assoc 'System.Title fields))))
     (azure-log this-command "Adding title: %s" title)
-    (format "* %s%s\n" (if (s-blank? state) "" (concat state " ")) title)))
+    (format "* %s%s\n"
+            (if todo-keyword (concat todo-keyword " ") "")
+            title)))
 
 (defun azure-devops--work-item-type (work-item)
   "Return an icon that represents the type of the WORK-ITEM."
@@ -1011,6 +1012,153 @@ This function implements Org's synchronous `:complete' protocol."
                          #'azure-devops--work-item-link-description
                          :help-echo "Open this work item in Emacs")
 
+(defun azure-devops--first-heading ()
+  "Return the first Org headline element in the current buffer."
+  (or (org-element-map
+          (org-element-parse-buffer) 'headline #'identity nil t)
+      (user-error "This buffer has no Org heading for an Azure work item")))
+
+(defun azure-devops--first-heading-title ()
+  "Return the title of the first Org heading in the current buffer.
+
+Org TODO keywords, priorities, and tags are not part of the returned title."
+  (let ((title (string-trim
+                (or (org-element-property
+                     :raw-value (azure-devops--first-heading))
+                    ""))))
+    (when (string-empty-p title)
+      (user-error "The Azure work-item title cannot be empty"))
+    title))
+
+(defun azure-devops--first-heading-state ()
+  "Return the Azure state selected on the first heading, or nil.
+
+A heading without a TODO keyword deliberately leaves the Azure state
+unchanged.  Signal a user error if a TODO keyword is present but is not one
+of the supported Azure state keywords."
+  (let ((keyword (org-element-property
+                  :todo-keyword (azure-devops--first-heading))))
+    (when keyword
+      (or (car (rassoc keyword azure-devops-mapping-states))
+          (user-error "Cannot push unsupported Azure state keyword %S"
+                      keyword)))))
+
+(defun azure-devops--first-heading-description ()
+  "Return the Org body of the first heading in the current buffer.
+
+The full contents of that heading, including any child headings, form the
+work-item description.  Later sibling headings such as Discussion, Personal
+Notes, and Links are excluded by Org's headline boundaries."
+  (let ((headline (azure-devops--first-heading)))
+    (if-let* ((begin (org-element-property :contents-begin headline))
+              (end (org-element-property :contents-end headline)))
+        (string-trim (buffer-substring-no-properties begin end))
+      "")))
+
+(defun azure-devops--document-property (name)
+  "Return the first Org node property named NAME in the current buffer."
+  (org-element-map
+      (org-element-parse-buffer) 'node-property
+    (lambda (property)
+      (when (string-equal
+             (downcase (org-element-property :key property))
+             (downcase name))
+        (org-element-property :value property)))
+    nil t))
+
+(defun azure-devops--set-document-property (name value)
+  "Set the first Org node property named NAME to VALUE.
+
+The property is found through Org's element API.  Signal an error when it is
+not present, since Azure work-item buffers are expected to contain it."
+  (let ((property
+         (org-element-map
+             (org-element-parse-buffer) 'node-property
+           (lambda (candidate)
+             (when (string-equal
+                    (downcase (org-element-property :key candidate))
+                    (downcase name))
+               candidate))
+           nil t)))
+    (unless property
+      (error "Azure work-item property %s is missing" name))
+    (let ((inhibit-read-only t)
+          (key (org-element-property :key property)))
+      (save-excursion
+        (goto-char (org-element-property :begin property))
+        (delete-region (line-beginning-position) (line-end-position))
+        (insert (format ":%s: %s" key value))))))
+
+;;;###autoload
+(defun azure-devops-update-work-item-description ()
+  "Push the first Org heading's title and body to Azure.
+
+The heading title becomes the Azure work-item title.  Its body becomes the
+work-item description.  A supported TODO keyword becomes the Azure state.
+Org priorities and tags are excluded from the title.  When the heading has
+no TODO keyword, leave the Azure state unchanged.
+
+The work-item ID and revision are read from the document property drawer.
+The revision is tested by Azure before updating, preventing an unnoticed
+write over a newer server revision.  On success, update the local revision
+and, when pushed, state properties.  Other fields, comments, personal notes,
+and links are untouched."
+  (interactive)
+  (unless (derived-mode-p 'org-mode)
+    (user-error "This command must be run in an Org work-item buffer"))
+  (unless (azure--valid-p)
+    (user-error "You need to run `azure-init` first!"))
+  (let* ((id-text (azure-devops--document-property "id"))
+         (revision-text (azure-devops--document-property "rev"))
+         (id (and id-text (string-to-number id-text)))
+         (revision (and revision-text (string-to-number revision-text))))
+    (unless (and id-text (> id 0))
+      (user-error "This buffer has no valid Azure work-item ID"))
+    (unless (and revision-text (> revision 0))
+      (user-error "This buffer has no valid Azure work-item revision"))
+    (let* ((title (azure-devops--first-heading-title))
+           (state (azure-devops--first-heading-state))
+           (description (azure-devops--first-heading-description))
+           (html (azure--org-to-html description))
+           (source-buffer (current-buffer))
+           (url (format "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/%d"
+                        id))
+           (patch
+            `(( ("op" . "test")
+                ("path" . "/rev")
+                ("value" . ,revision))
+              ( ("op" . "add")
+                ("path" . "/fields/System.Title")
+                ("value" . ,title))
+              ( ("op" . "add")
+                ("path" . "/fields/System.Description")
+                ("value" . ,html)))))
+      (when state
+        (setq patch
+              (append patch
+                      `(( ("op" . "add")
+                          ("path" . "/fields/System.State")
+                          ("value" . ,state))))))
+      (azure-req
+       "PATCH" url
+       (cl-function
+        (lambda (&key data &allow-other-keys)
+          (let ((new-revision (cdr (assoc 'rev data))))
+            (when (and new-revision (buffer-live-p source-buffer))
+              (with-current-buffer source-buffer
+                (azure-devops--set-document-property "rev" new-revision)
+                (when state
+                  (azure-devops--set-document-property "state" state))))
+            (message "Updated Azure work item %d title, description%s%s"
+                     id
+                     (if state (format ", and state (%s)" state) "")
+                     (if new-revision
+                         (format " (revision %s)" new-revision)
+                       "")))))
+       '(("api-version" . "7.1"))
+       patch
+       '(("Content-Type" . "application/json-patch+json"))))))
+
 ;; We retrieve all the information needed first and if that succeeds,
 ;; we replace everything in our local copy of the issue with what we
 ;; retrieved. Only clocking and personal notes are persisted from the
@@ -1027,7 +1175,10 @@ This function implements Org's synchronous `:complete' protocol."
          (this-command "azure-devops--update-work-item-buffer"))
     (with-current-buffer buf
       (goto-char (point-min))
+      ;; A document property drawer must precede file-level keywords for Org to
+      ;; recognize it as a property drawer.
       (insert (azure-devops--work-item-properties work-item))
+      (insert azure-devops-work-item-todo-directive "\n")
       (insert (azure-devops--work-item-type work-item) "\n")
       (insert (azure-devops--work-item-title work-item))
       (save-excursion
@@ -1046,6 +1197,9 @@ This function implements Org's synchronous `:complete' protocol."
       (unless (bolp) (insert "\n"))
       (insert "\n" (azure-devops--work-item-links
                        work-item related-work-items))
+      ;; Recompute Org's buffer-local TODO machinery after inserting the
+      ;; file-level directive into an already open buffer.
+      (org-set-regexps-and-options)
       (save-buffer)
       (azure-log this-command "Rename file: %s -> %s" (format "%d-Not-yet-updated" id) (format "%d-%s" id filename))
       (rename-visited-file (format "%d-%s" id filename))
@@ -1080,7 +1234,7 @@ When called interactively, retrieve the current work-item list immediately
 and offer completion candidates showing state, assignee, title, and ID.
 Typing in the completion interface narrows that list incrementally.
 
-See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
+See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
 for more information."
   (interactive (list (azure-devops--read-work-item-id)))
   (azure-log this-command "Show work-item with id: %S" id)
@@ -1092,8 +1246,8 @@ for more information."
 (defun azure-devops-work-item-create (item-type title)
   "Create a new work-item by specifying ITEM-TYPE and TITLE.
 
-   See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create'
-   for more information."
+See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create'
+for more information."
   (interactive (list (completing-read "Item type: " '("Epic" "Issue" "Task"))
                      (read-from-minibuffer "Item title: ")))
   (let ((url (concat "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$" item-type))
@@ -1113,10 +1267,10 @@ for more information."
 
 
 (defun azure-devops--work-item-get (id)
-  "Get all the relevant information about a work-item by it's ID.
+  "Get all relevant information about the work item identified by ID.
 
-  See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
-  for more information."
+See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
+for more information."
   (promise-new
    (lambda (resolve _reject)
      (azure-get (format "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/%d" id)

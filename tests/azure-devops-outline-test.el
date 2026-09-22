@@ -70,7 +70,11 @@
           (azure-devops-outline-mode)
           (should (derived-mode-p 'org-mode))
           (should buffer-read-only)
-          (should-not buffer-offer-save))
+          (should-not buffer-offer-save)
+          (should (eq (key-binding (kbd "g"))
+                      #'azure-devops-work-item-outline))
+          (should (eq (lookup-key org-columns-map (kbd "g"))
+                      #'azure-devops-work-item-outline)))
       (kill-buffer buffer))))
 
 (ert-deftest azure-devops-outline-return-opens-heading-work-item ()
@@ -90,6 +94,24 @@
         (call-interactively (key-binding (kbd "RET"))))
       (should (equal (org-element-property :type opened) "azure-work-item"))
       (should (equal (org-element-property :path opened) "42")))))
+
+(ert-deftest azure-devops-outline-display-starts-in-contents-view ()
+  (let ((azure-project "Example")
+        buffer)
+    (unwind-protect
+        (progn
+          (setq buffer
+                (azure-devops-outline--display
+                 (list (azure-devops-outline-test--item
+                        1 "Main epic" "Epic" "Active"))
+                 nil))
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (re-search-forward "^\\*\\* ACTIVE ")
+            (forward-line 1)
+            (should (org-fold-folded-p (point)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest azure-devops-outline-return-rejects-structural-heading ()
   (with-temp-buffer

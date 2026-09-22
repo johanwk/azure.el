@@ -235,6 +235,8 @@ Note that the API spans multiple hosts; this is just the most common one.")
   "Find and display an Azure DevOps work item." t)
 (autoload 'azure-devops-work-item-create "azure-devops"
   "Create an Azure DevOps work item." t)
+(autoload 'azure-devops-update-work-item-description "azure-devops"
+  "Push the current work item's title and description to Azure DevOps." t)
 (autoload 'azure-devops-insert-work-item-link "azure-devops"
   "Search for and insert an Azure DevOps work-item link." t)
 (autoload 'azure-devops-work-item-outline "azure-devops-outline"
@@ -261,7 +263,11 @@ Note that the API spans multiple hosts; this is just the most common one.")
     ["Insert work-item link..." azure-devops-insert-work-item-link
      :help "Search for a work item and insert an Org link at point."]
     ["Create work item..." azure-devops-work-item-create
-     :help "Create a new work item."]))
+     :help "Create a new work item."]
+    "----"
+    ["Push work-item changes" azure-devops-update-work-item-description
+     :enable (derived-mode-p 'org-mode)
+     :help "Push the current work item's title and description to Azure DevOps."]))
 
 ;; Request handling
 
