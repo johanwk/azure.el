@@ -1421,25 +1421,43 @@ See the Azure DevOps documentation for the work-items Get API."
 ;; [[https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create][Create]]
 
 
-(defun azure-devops-work-item-create (item-type title)
-  "Create a new work-item by specifying ITEM-TYPE and TITLE.
+(defun azure-devops--prompt-work-item-create (types)
+  "Prompt for a work-item type from TYPES and a title, then create it."
+  (unless types
+    (user-error "This Azure DevOps project has no available work-item types"))
+  (azure-devops-work-item-create
+   (completing-read "Item type: " types nil t)
+   (read-from-minibuffer "Item title: ")))
 
-See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create'
-for more information."
-  (interactive (list (completing-read "Item type: " '("Epic" "Issue" "Task"))
-                     (read-from-minibuffer "Item title: ")))
-  (let ((url (concat "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$" item-type))
-        (title (format "%s" title)))
-    (azure-post url
-                (cl-function
-                 (lambda (&key data &allow-other-keys)
-                   (azure-devops-work-item (cdr (assoc 'id data)))))
-                `((("op" . "add")
-                   ("path" . "/fields/System.title")
-                   ("from" . nil)
-                   ("value" . ,title)))
-                '(("api-version" . "7.1-preview.3"))
-                '(("Content-Type" . "application/json-patch+json")))))
+(defun azure-devops-work-item-create (&optional item-type title)
+  "Create a new work item of ITEM-TYPE with TITLE.
+
+Interactively, retrieve the current project's work-item types from Azure
+DevOps before prompting.  Noninteractively, ITEM-TYPE and TITLE are required.
+
+See the Azure DevOps documentation for the work-items Create API."
+  (interactive (list :interactive nil))
+  (unless (azure--valid-p)
+    (user-error "You need to run `azure-init` first!"))
+  (if (eq item-type :interactive)
+      (azure-devops--fetch-work-item-types
+       #'azure-devops--prompt-work-item-create)
+    (unless (and (stringp item-type) (not (string-empty-p item-type))
+                 (stringp title) (not (string-empty-p title)))
+      (user-error "A work-item type and title are required"))
+    (let ((url (concat
+                "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$"
+                (url-hexify-string item-type))))
+      (azure-post url
+                  (cl-function
+                   (lambda (&key data &allow-other-keys)
+                     (azure-devops-work-item (cdr (assoc 'id data)))))
+                  `((("op" . "add")
+                     ("path" . "/fields/System.title")
+                     ("from" . nil)
+                     ("value" . ,title)))
+                  '(("api-version" . "7.1-preview.3"))
+                  '(("Content-Type" . "application/json-patch+json"))))))
 
 ;; [[https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item][Get Work Item]]
 
