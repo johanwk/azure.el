@@ -427,7 +427,7 @@ hard-line-break markers."
    organization that the authenticated user has access to.
 
    See URL `https://docs.microsoft.com/en-us/rest/api/azure/devops/core/projects/list'
-   for more information."
+   for more information."
   (promise-new
    (lambda (resolve _reject)
      (let ((url "https://dev.azure.com/{organization}/_apis/projects"))

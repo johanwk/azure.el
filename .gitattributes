@@ -1,0 +1,4 @@
+# Keep project sources and build files consistent across platforms.
+*.el text eol=lf
+*.org text eol=lf
+Makefile text eol=lf
