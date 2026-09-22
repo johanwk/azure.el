@@ -298,7 +298,7 @@
             (System.State . "Active")
             (System.AssignedTo (displayName . "Ada Lovelace"))
             (System.CreatedDate . "2026-09-22")
-            (System.CreatedBy (displayName . "Grace Hopper")))))))
+            (System.CreatedBy (displayName . "Grace Hopper"))))))
     (should (string-match-p
              "^:assignee: Ada Lovelace$"
              (azure-devops--work-item-properties work-item)))))

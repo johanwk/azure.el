@@ -1300,8 +1300,18 @@ for more information."
         ("api-version" . "7.1-preview.3"))
       (cl-function
        (lambda (&rest args &key response error-thrown &allow-other-keys)
-         (let ((status (and (request-response-p response)
-                            (request-response-status-code response))))
+         ;; Do not guard the accessor with `request-response-p'.  That predicate
+         ;; may be inlined when this file is byte-compiled, which prevents tests
+         ;; (and compatible response implementations) from overriding it.
+         (let ((status (or (and response
+                                (ignore-errors
+                                  (request-response-status-code response)))
+                           ;; Compiled struct accessors cannot reliably be
+                           ;; overridden in tests; `request' also includes the
+                           ;; HTTP status in ERROR-THROWN.
+                           (and (listp error-thrown)
+                                (memq 404 error-thrown)
+                                404))))
            (azure-log "azure-devops--work-item-get"
                       "Arguments when error occurred: %s" args)
            (if (and missing-ok (= (or status 0) 404))
