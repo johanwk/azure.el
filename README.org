@@ -18,6 +18,10 @@
 
 (use-package azure-devops
   :after azure)
+
+(use-package azure-devops-outline
+  :after azure-devops
+  :commands azure-devops-work-item-outline)
 #+end_src
 
 * Usage
@@ -62,6 +66,20 @@ With this command, you will be prompted to input a title. Once a title
 is supplied, a work-item is created on the server and the new item is
 visited via ~azure-devops-work-item~. At this point, it's just about editing
 and saving the changes.
+
+** azure-devops-work-item-outline
+
+Run ~azure-devops-work-item-outline~ to retrieve a snapshot of all work
+items in the current project.  The command displays a disposable,
+read-only Org buffer.  Parent/Child relations determine heading nesting,
+and work items without either relation appear under /Unlinked work
+items/.
+
+Each heading links to the full work-item buffer through the
+~azure-work-item:~ Org link type.  Heading properties contain the Azure
+ID, type, state, and assignee.  Use ~org-columns~ to view these properties
+as columns.  The snapshot is not synchronized back to Azure; rerun the
+command to obtain a new snapshot.
 
 ** Working with org-mode & git
 

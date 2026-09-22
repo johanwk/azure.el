@@ -817,8 +817,20 @@ multiple capitalizations of its field names."
                     (downcase name)))
     fields)))
 
+(defun azure-devops--identity-display-name (identity)
+  "Return a concise display name for Azure IDENTITY."
+  (cond
+   ((stringp identity) identity)
+   ((listp identity)
+    (or (cdr (assoc 'displayName identity))
+        (cdr (assoc 'uniqueName identity))
+        ""))
+   (t "")))
+
 (defun azure-devops--link-search-results (data)
-  "Extract work-item IDs and titles from Azure Search response DATA."
+  "Extract completion data from Azure Search response DATA.
+
+Each result has the form (ID TITLE STATE ASSIGNEE)."
   (delq
    nil
    (mapcar
@@ -829,12 +841,19 @@ multiple capitalizations of its field names."
                      (car (mapcar #'cdr fields))))
              (title (or (azure-devops--search-result-field
                          fields "System.Title")
-                        (nth 2 (mapcar #'cdr fields)))))
+                        (nth 2 (mapcar #'cdr fields))))
+             (state (azure-devops--search-result-field
+                     fields "System.State"))
+             (assignee (azure-devops--identity-display-name
+                        (azure-devops--search-result-field
+                         fields "System.AssignedTo"))))
         (when id
           (list (format "%s" id)
                 (replace-regexp-in-string
                  "[\n\r]+" " "
-                 (or title (format "Work item %s" id)))))))
+                 (or title (format "Work item %s" id)))
+                (or state "")
+                assignee))))
     (cdr (assoc 'results data)))))
 
 (defun azure-devops--link-search-text (query)
@@ -856,7 +875,7 @@ unchanged."
      (t query))))
 
 (defun azure-devops--search-work-items-for-link (query success)
-  "Search for QUERY and call SUCCESS with a list of (ID TITLE) pairs.
+  "Search for QUERY and call SUCCESS with completion item lists.
 
 Plain words in QUERY use case-insensitive prefix matching."
   (let ((url "https://almsearch.dev.azure.com/{organization}/{project}/_apis/search/workitemsearchresults")
@@ -879,20 +898,49 @@ Plain words in QUERY use case-insensitive prefix matching."
 (defvar azure-devops--work-item-link-titles (make-hash-table :test #'equal)
   "Titles remembered while completing `azure-work-item' links.")
 
+(defun azure-devops--work-item-candidate (item)
+  "Return a completion candidate for work ITEM.
+
+ITEM has the form (ID TITLE STATE ASSIGNEE)."
+  (let ((id (nth 0 item))
+        (title (nth 1 item))
+        (state (nth 2 item))
+        (assignee (nth 3 item)))
+    (format "%-10s  %-28s  %s  (#%s)"
+            (or state "")
+            (or assignee "")
+            title
+            id)))
+
 (defun azure-devops--select-work-item (results)
   "Prompt for and return one work item from RESULTS.
 
-Each element of RESULTS has the form (ID TITLE)."
+Each element of RESULTS has the form (ID TITLE STATE ASSIGNEE)."
   (unless results
     (user-error "No matching Azure work items"))
   (let* ((candidates
           (mapcar
            (lambda (item)
-             (cons (format "%s — %s" (car item) (cadr item)) item))
+             (cons (azure-devops--work-item-candidate item) item))
            results))
-         (choice (completing-read "Work item: " candidates nil t))
+         (completion-extra-properties
+          '(:category azure-devops-work-item))
+         (choice (completing-read
+                  "Work item (state, assignee, title): "
+                  candidates nil t))
          (item (cdr (assoc choice candidates))))
     (or item (user-error "No work item selected"))))
+
+(defun azure-devops--read-work-item-id ()
+  "Interactively select and return an Azure work-item ID.
+
+Retrieve the current work-item list, then let the completion interface
+perform incremental narrowing."
+  (unless (azure--valid-p)
+    (user-error "You need to run `azure-init` first!"))
+  (let ((item (azure-devops--select-work-item
+               (azure-devops--wait-for-link-search ""))))
+    (string-to-number (car item))))
 
 (defun azure-devops--insert-selected-work-item-link (marker results)
   "At MARKER, insert an Azure work-item link selected from RESULTS."
@@ -1004,7 +1052,8 @@ This function implements Org's synchronous `:complete' protocol."
                        work-item related-work-items))
       (save-buffer)
       (azure-log this-command "Rename file: %s -> %s" (format "%d-Not-yet-updated" id) (format "%d-%s" id filename))
-      (rename-visited-file (format "%d-%s" id filename)))))
+      (rename-visited-file (format "%d-%s" id filename))
+      (org-fold-hide-drawer-all))))
 
 (defun azure-devops--work-item-web-url (work-item)
   "Return the Azure DevOps web URL for WORK-ITEM."
@@ -1029,11 +1078,15 @@ This function implements Org's synchronous `:complete' protocol."
           (azure-devops--work-item-relations related-work-items)))
 
 (defun azure-devops-work-item (id)
-  "Show the work-item with ID in a buffer of it's own.
+  "Show the work-item with ID in a buffer of its own.
 
-  See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
-  for more information."
-  (interactive (list (azure-devops-search-selected-id)))
+When called interactively, retrieve the current work-item list immediately
+and offer completion candidates showing state, assignee, title, and ID.
+Typing in the completion interface narrows that list incrementally.
+
+See URL 'https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item'
+for more information."
+  (interactive (list (azure-devops--read-work-item-id)))
   (azure-log this-command "Show work-item with id: %S" id)
   (funcall 'azure-devops--update-work-item-buffer id))
 #+end_src

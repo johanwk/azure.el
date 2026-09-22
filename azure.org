@@ -226,6 +226,19 @@ Note that the API spans multiple hosts; this is just the most common one.")
     map)
   "Keymap used when `azure-minor-mode` is turned on.")
 
+;; Keep the DevOps libraries optional while making their menu commands
+;; available even when only `azure' has been loaded.
+(autoload 'azure-devops-search "azure-devops"
+  "List and search for Azure DevOps work items." t)
+(autoload 'azure-devops-work-item "azure-devops"
+  "Find and display an Azure DevOps work item." t)
+(autoload 'azure-devops-work-item-create "azure-devops"
+  "Create an Azure DevOps work item." t)
+(autoload 'azure-devops-insert-work-item-link "azure-devops"
+  "Search for and insert an Azure DevOps work-item link." t)
+(autoload 'azure-devops-work-item-outline "azure-devops-outline"
+  "Display all project work items as a read-only Org outline." t)
+
 (easy-menu-define azure-minor-mode-menu
   azure-minor-mode-map
   "Menu available when azure-minor-mode is enabled."
@@ -237,12 +250,17 @@ Note that the API spans multiple hosts; this is just the most common one.")
      :help "Setup azure.el for first-time use."]
     ["----"
      :visible (not (azure--valid-p))]
-    ["Search for work-item" azure-devops-search
-     :help "List and search for work-items."]
-    ["Show work-item" azure-devops-work-item
-     :help "Quickly find and show a specific work-item."]
-    ["Create work-item" azure-devops-work-item-create
-     :help "Create a new work-item."]))
+    ["Search work items..." azure-devops-search
+     :help "List and search for work items."]
+    ["Show work item..." azure-devops-work-item
+     :help "Quickly find and show a specific work item."]
+    ["Show work-item outline" azure-devops-work-item-outline
+     :help "Retrieve a read-only Org outline of all project work items."]
+    "----"
+    ["Insert work-item link..." azure-devops-insert-work-item-link
+     :help "Search for a work item and insert an Org link at point."]
+    ["Create work item..." azure-devops-work-item-create
+     :help "Create a new work item."]))
 #+end_src
 
 ** Request handling
@@ -314,21 +332,66 @@ Optionally, you can pass additional PARAMS, DATA & HEADERS.
 These helper-functions are why we rely on =pandoc=. We convert to and
 from HTML and org-mode, so that we can work in regular text-documents.
 #+begin_src emacs-lisp
+(defun azure--pandoc-convert (text from-format to-format)
+  "Convert TEXT from FROM-FORMAT to TO-FORMAT using Pandoc.
+
+TEXT is supplied to Pandoc over standard input.  It is never interpolated
+into a shell command, so HTML entities, quotes, and other shell metacharacters
+are handled literally."
+  (let ((program (executable-find azure-pandoc-executable)))
+    (unless program
+      (error "The pandoc executable was not found on your PATH.  It is a pre-requisite to azure.el"))
+    (let ((output (generate-new-buffer " *azure-pandoc-output*"))
+          (stderr-file (make-temp-file "azure-pandoc-stderr-"))
+          (coding-system-for-read 'utf-8-unix)
+          (coding-system-for-write 'utf-8-unix))
+      (unwind-protect
+          (with-temp-buffer
+            (insert text)
+            (let ((status
+                   (call-process-region
+                    (point-min) (point-max) program nil
+                    (list output stderr-file) nil
+                    "--from" from-format "--to" to-format
+                    "--wrap=none")))
+              (if (and (integerp status) (zerop status))
+                  (with-current-buffer output
+                    (string-trim (buffer-string)))
+                (let ((stderr
+                       (with-temp-buffer
+                         (insert-file-contents stderr-file)
+                         (string-trim (buffer-string)))))
+                  (error "Pandoc conversion failed%s"
+                         (if (string-empty-p stderr)
+                             (format " (status %s)" status)
+                           (format ": %s" stderr)))))))
+        (kill-buffer output)
+        (delete-file stderr-file)))))
+
+(defun azure--clean-org-conversion (text)
+  "Clean Pandoc-generated Org TEXT for insertion into a buffer.
+Normalize line endings and non-breaking spaces, discard control
+characters other than newlines and tabs, and remove Pandoc's Org
+hard-line-break markers."
+  (setq text (replace-regexp-in-string "\r\n?" "\n" text))
+  (setq text (replace-regexp-in-string "\u00a0" " " text nil t))
+  (setq text
+        (replace-regexp-in-string
+         "[[:cntrl:]]"
+         (lambda (character)
+           (if (member character '("\n" "\t")) character ""))
+         text nil t))
+  (setq text (replace-regexp-in-string "\\\\\\\\[ \t]*$" "" text))
+  (string-trim text))
+
 (defun azure--html-to-org (html)
-  "Convert an HTML string into `org-mode` string."
-  (unless (executable-find azure-pandoc-executable)
-    (error "The pandoc executable was not found on your PATH.  It is a pre-requisite to azure.el"))
-  (->> (shell-command-to-string (concat "echo \"" html "\" | pandoc -f html -t org"))
-       (s-chop-left 2)
-       (s-chop-right 2)))
+  "Convert an HTML string into a cleaned Org string."
+  (azure--clean-org-conversion
+   (azure--pandoc-convert html "html" "org")))
 
 (defun azure--org-to-html (org)
-  "Convert ORG mode into `html` using `pandoc`."
-  (unless (executable-find azure-pandoc-executable)
-    (error "The pandoc executable was not found on your PATH.  It is a pre-requisite to azure.el"))
-  (format "%s"
-          (shell-command-to-string
-           (concat "echo \"" org "\" | pandoc -f org -t html"))))
+  "Convert an Org string into HTML."
+  (azure--pandoc-convert org "org" "html"))
 #+end_src
 
 ** Core

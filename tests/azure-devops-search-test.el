@@ -163,10 +163,48 @@
             ((fields
               (System.Id . 796829)
               (System.WorkItemType . "Feature")
-              (System.Title . "Integration with VIS")))))))
+              (System.Title . "Integration with VIS")
+              (System.State . "Active")
+              (System.AssignedTo
+               (displayName . "Klüwer, Johan Wilhelm")
+               (uniqueName . "johan@example.org"))))))))
     (should
      (equal (azure-devops--link-search-results data)
-            '(("796829" "Integration with VIS"))))))
+            '(("796829" "Integration with VIS" "Active"
+               "Klüwer, Johan Wilhelm"))))))
+
+(ert-deftest azure-devops-work-item-candidate-shows-useful-fields ()
+  (should
+   (equal
+    (azure-devops--work-item-candidate
+     '("796829" "Integration with VIS" "Active" "Ada Lovelace"))
+    "Active      Ada Lovelace                  Integration with VIS  (#796829)")))
+
+(ert-deftest azure-devops-read-work-item-id-skips-search-prompt ()
+  (let ((azure-organization "Example")
+        (azure-project "Project")
+        (azure-team "Team")
+        query)
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (&rest _)
+                 (ert-fail "Work-item selection should not prompt for a query")))
+              ((symbol-function 'azure-devops--wait-for-link-search)
+               (lambda (value)
+                 (setq query value)
+                 '(("796829" "Integration with VIS" "Active" "Ada Lovelace"))))
+              ((symbol-function 'azure-devops--select-work-item)
+               (lambda (items) (car items))))
+      (should (= (azure-devops--read-work-item-id) 796829))
+      (should (equal query "")))))
+
+(ert-deftest azure-devops-interactive-work-item-uses-completion ()
+  (let (opened)
+    (cl-letf (((symbol-function 'azure-devops--read-work-item-id)
+               (lambda () 796829))
+              ((symbol-function 'azure-devops--update-work-item-buffer)
+               (lambda (id) (setq opened id))))
+      (call-interactively #'azure-devops-work-item)
+      (should (= opened 796829)))))
 
 (ert-deftest azure-devops-link-search-uses-case-insensitive-prefixes ()
   ;; Azure Search interprets a trailing `*' as a prefix wildcard and
