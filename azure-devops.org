@@ -1090,10 +1090,12 @@ ITEM has the form (ID TITLE STATE ASSIGNEE)."
             title
             id)))
 
-(defun azure-devops--select-work-item (results)
+(defun azure-devops--select-work-item (results &optional default-id prompt)
   "Prompt for and return one work item from RESULTS.
 
-Each element of RESULTS has the form (ID TITLE STATE ASSIGNEE)."
+Each element of RESULTS has the form (ID TITLE STATE ASSIGNEE).
+DEFAULT-ID, when present in RESULTS, is the preselected candidate.  Use
+PROMPT instead of the standard work-item prompt when it is non-nil."
   (unless results
     (user-error "No matching Azure work items"))
   (let* ((candidates
@@ -1101,11 +1103,18 @@ Each element of RESULTS has the form (ID TITLE STATE ASSIGNEE)."
            (lambda (item)
              (cons (azure-devops--work-item-candidate item) item))
            results))
+         (default-item
+          (and default-id
+               (seq-find (lambda (item)
+                           (equal (car item) (format "%s" default-id)))
+                         results)))
+         (default (and default-item
+                       (azure-devops--work-item-candidate default-item)))
          (completion-extra-properties
           '(:category azure-devops-work-item))
          (choice (completing-read
-                  "Work item (state, assignee, title): "
-                  candidates nil t))
+                  (or prompt "Work item (state, assignee, title): ")
+                  candidates nil t nil nil default))
          (item (cdr (assoc choice candidates))))
     (or item (user-error "No work item selected"))))
 
@@ -1440,41 +1449,90 @@ See the Azure DevOps documentation for the work-items Get API."
 *** [[https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create][Create]]
 
 #+begin_src emacs-lisp  
-(defun azure-devops--prompt-work-item-create (types)
-  "Prompt for a work-item type from TYPES and a title, then create it."
+(defun azure-devops--create-parent-id ()
+  "Return the work-item ID at the current Org context, or nil.
+
+In an Azure work-items outline, use AZURE_ID at point.  In an individual
+work-item buffer, use the document's id property."
+  (when (derived-mode-p 'org-mode)
+    (let ((id
+           (if (string-prefix-p "*Azure work items" (buffer-name))
+               (save-excursion
+                 (when (org-before-first-heading-p)
+                   (user-error "Move point to a work-item heading first"))
+                 (org-back-to-heading t)
+                 (org-entry-get nil "AZURE_ID" nil))
+             (azure-devops--document-property "id"))))
+      (when (and id (string-match-p "\\`[0-9]+\\'" id))
+        (string-to-number id)))))
+
+(defun azure-devops--prompt-work-item-create (types &optional default-parent-id)
+  "Prompt for type, title, and parent, then create a work item.
+
+Choose the type from TYPES.  DEFAULT-PARENT-ID is preselected in the parent
+completion list when that work item is in the returned Azure search results."
   (unless types
     (user-error "This Azure DevOps project has no available work-item types"))
-  (azure-devops-work-item-create
-   (completing-read "Item type: " types nil t)
-   (read-from-minibuffer "Item title: ")))
+  (let* ((item-type (completing-read "Item type: " types nil t))
+         (title (read-from-minibuffer "Item title: "))
+         (parent
+          (azure-devops--select-work-item
+           (azure-devops--wait-for-link-search "")
+           default-parent-id
+           "Parent (state, assignee, title): ")))
+    (azure-devops-work-item-create
+     item-type title (string-to-number (car parent)))))
 
-(defun azure-devops-work-item-create (&optional item-type title)
-  "Create a new work item of ITEM-TYPE with TITLE.
+(defun azure-devops-work-item-create (&optional item-type title parent-id)
+  "Create a new work item of ITEM-TYPE with TITLE and PARENT-ID.
 
-Interactively, retrieve the current project's work-item types from Azure
-DevOps before prompting.  Noninteractively, ITEM-TYPE and TITLE are required.
+Interactively, retrieve the current project's work-item types and work items
+from Azure DevOps before prompting.  The current work-item document id, or the
+AZURE_ID on the current heading in an `*Azure work items' buffer, is offered as
+the default parent.  The completion list can be used to select another parent.
+Noninteractively, ITEM-TYPE and TITLE are required; PARENT-ID is optional.
 
 See the Azure DevOps documentation for the work-items Create API."
-  (interactive (list :interactive nil))
+  (interactive (list :interactive nil (azure-devops--create-parent-id)))
   (unless (azure--valid-p)
     (user-error "You need to run `azure-init` first!"))
   (if (eq item-type :interactive)
-      (azure-devops--fetch-work-item-types
-       #'azure-devops--prompt-work-item-create)
+      (if parent-id
+          (let ((default-parent-id parent-id))
+            (azure-devops--fetch-work-item-types
+             (lambda (types)
+               (azure-devops--prompt-work-item-create
+                types default-parent-id))))
+        (azure-devops--fetch-work-item-types
+         #'azure-devops--prompt-work-item-create))
     (unless (and (stringp item-type) (not (string-empty-p item-type))
                  (stringp title) (not (string-empty-p title)))
       (user-error "A work-item type and title are required"))
-    (let ((url (concat
-                "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$"
-                (url-hexify-string item-type))))
+    (let* ((url (concat
+                 "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$"
+                 (url-hexify-string item-type)))
+           (patch
+            `((("op" . "add")
+               ("path" . "/fields/System.title")
+               ("from" . nil)
+               ("value" . ,title)))))
+      (when parent-id
+        (setq patch
+              (append
+               patch
+               `((("op" . "add")
+                  ("path" . "/relations/-")
+                  ("value"
+                   ("rel" . "System.LinkTypes.Hierarchy-Reverse")
+                   ("url" . ,(format
+                              "https://dev.azure.com/%s/_apis/wit/workItems/%d"
+                              (url-hexify-string azure-organization)
+                              parent-id))))))))
       (azure-post url
                   (cl-function
                    (lambda (&key data &allow-other-keys)
                      (azure-devops-work-item (cdr (assoc 'id data)))))
-                  `((("op" . "add")
-                     ("path" . "/fields/System.title")
-                     ("from" . nil)
-                     ("value" . ,title)))
+                  patch
                   '(("api-version" . "7.1-preview.3"))
                   '(("Content-Type" . "application/json-patch+json"))))))
 #+end_src
