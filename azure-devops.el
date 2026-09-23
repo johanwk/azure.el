@@ -1287,15 +1287,17 @@ not present, since Azure work-item buffers are expected to contain it."
   "Push the first Org heading's title and body to Azure.
 
 The heading title becomes the Azure work-item title.  Its body becomes the
-work-item description.  A supported TODO keyword becomes the Azure state.
-Org priorities and tags are excluded from the title.  When the heading has
-no TODO keyword, leave the Azure state unchanged.
+work-item description, and the document's assignee property becomes the Azure
+assignee.  A supported TODO keyword becomes the Azure state.  Org priorities
+and tags are excluded from the title.  When the heading has no TODO keyword,
+leave the Azure state unchanged.
 
-The work-item ID and revision are read from the document property drawer.
+The work-item ID, revision, and assignee are read from the document property
+drawer.
 The revision is tested by Azure before updating, preventing an unnoticed
 write over a newer server revision.  On success, update the local revision
-and, when pushed, state properties.  Other fields, comments, personal notes,
-and links are untouched."
+and, when pushed, state properties.  Comments, personal notes, and links are
+untouched."
   (interactive)
   (unless (derived-mode-p 'org-mode)
     (user-error "This command must be run in an Org work-item buffer"))
@@ -1311,6 +1313,7 @@ and links are untouched."
       (user-error "This buffer has no valid Azure work-item revision"))
     (let* ((title (azure-devops--first-heading-title))
            (state (azure-devops--first-heading-state))
+           (assignee (or (azure-devops--document-property "assignee") ""))
            (description (azure-devops--first-heading-description))
            (html (azure--org-to-html description))
            (source-buffer (current-buffer))
@@ -1325,7 +1328,10 @@ and links are untouched."
                 ("value" . ,title))
               ( ("op" . "add")
                 ("path" . "/fields/System.Description")
-                ("value" . ,html)))))
+                ("value" . ,html))
+              ( ("op" . "add")
+                ("path" . "/fields/System.AssignedTo")
+                ("value" . ,assignee)))))
       (when state
         (setq patch
               (append patch
@@ -1342,7 +1348,7 @@ and links are untouched."
                 (azure-devops--set-document-property "rev" new-revision)
                 (when state
                   (azure-devops--set-document-property "state" state))))
-            (message "Updated Azure work item %d title, description%s%s"
+            (message "Updated Azure work item %d title, description, assignee%s%s"
                      id
                      (if state (format ", and state (%s)" state) "")
                      (if new-revision
@@ -1524,6 +1530,9 @@ from Azure DevOps before prompting.  The current work-item document id, or the
 AZURE_ID on the current heading in an `*Azure work items' buffer, is offered as
 the default parent.  The completion list can be used to select another parent.
 Noninteractively, ITEM-TYPE and TITLE are required; PARENT-ID is optional.
+The new item is assigned to the authenticated user's unambiguous Azure account
+identity, which is then included in the generated document's assignee property
+when the item is read back from Azure.
 
 See the Azure DevOps documentation for the work-items Create API."
   (interactive (list :interactive nil (azure-devops--create-parent-id)))
@@ -1541,33 +1550,42 @@ See the Azure DevOps documentation for the work-items Create API."
     (unless (and (stringp item-type) (not (string-empty-p item-type))
                  (stringp title) (not (string-empty-p title)))
       (user-error "A work-item type and title are required"))
-    (let* ((url (concat
-                 "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$"
-                 (url-hexify-string item-type)))
-           (patch
-            `((("op" . "add")
-               ("path" . "/fields/System.title")
-               ("from" . nil)
-               ("value" . ,title)))))
-      (when parent-id
-        (setq patch
-              (append
-               patch
-               `((("op" . "add")
-                  ("path" . "/relations/-")
-                  ("value"
-                   ("rel" . "System.LinkTypes.Hierarchy-Reverse")
-                   ("url" . ,(format
-                              "https://dev.azure.com/%s/_apis/wit/workItems/%d"
-                              (url-hexify-string azure-organization)
-                              parent-id))))))))
-      (azure-post url
-                  (cl-function
-                   (lambda (&key data &allow-other-keys)
-                     (azure-devops-work-item (cdr (assoc 'id data)))))
-                  patch
-                  '(("api-version" . "7.1-preview.3"))
-                  '(("Content-Type" . "application/json-patch+json"))))))
+    (let ((url (concat
+                "https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$"
+                (url-hexify-string item-type))))
+      ;; `azure--user' is a display name used by the UI.  Azure can reject it
+      ;; for Assigned To, so resolve the authenticated user's account identity.
+      (promise-then
+       (azure-get-current-user-assignment)
+       (lambda (assignee)
+         (let ((patch
+                `((("op" . "add")
+                   ("path" . "/fields/System.title")
+                   ("from" . nil)
+                   ("value" . ,title))
+                  (("op" . "add")
+                   ("path" . "/fields/System.AssignedTo")
+                   ("from" . nil)
+                   ("value" . ,assignee)))))
+           (when parent-id
+             (setq patch
+                   (append
+                    patch
+                    `((("op" . "add")
+                       ("path" . "/relations/-")
+                       ("value"
+                        ("rel" . "System.LinkTypes.Hierarchy-Reverse")
+                        ("url" . ,(format
+                                   "https://dev.azure.com/%s/_apis/wit/workItems/%d"
+                                   (url-hexify-string azure-organization)
+                                   parent-id))))))))
+           (azure-post url
+                       (cl-function
+                        (lambda (&key data &allow-other-keys)
+                          (azure-devops-work-item (cdr (assoc 'id data)))))
+                       patch
+                       '(("api-version" . "7.1-preview.3"))
+                       '(("Content-Type" . "application/json-patch+json")))))))))
 
 ;; [[https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-item][Get Work Item]]
 

@@ -411,18 +411,52 @@ hard-line-break markers."
 ;; User
 
 
-(defun azure-get-current-user ()
-  "Get information about the currently logged in user."
+(defun azure--identity-property (identity property)
+  "Return PROPERTY's value from an Azure connection IDENTITY."
+  (let* ((properties (cdr (assoc 'properties identity)))
+         (entry (cdr (assoc property properties))))
+    (if (listp entry)
+        (or (cdr (assoc '$value entry))
+            (cdr (assoc 'value entry)))
+      entry)))
+
+(defun azure--current-user-assignment (identity)
+  "Return an unambiguous Assigned To value from connection IDENTITY.
+Prefer Azure's account name (normally an email address), because display names
+are not necessarily valid or unique work-item identities."
+  (or (cdr (assoc 'uniqueName identity))
+      (azure--identity-property identity 'Account)
+      (cdr (assoc 'providerDisplayName identity))
+      (cdr (assoc 'customDisplayName identity))))
+
+(defun azure-get-current-user-identity ()
+  "Return the authenticated user's Azure connection identity."
   (promise-new
    (lambda (resolve _reject)
-     (let ((url "https://dev.azure.com/{organization}/_apis/connectiondata"))
-       (azure-get url
-                  (cl-function
-                   (lambda (&key data &allow-other-keys)
-                     (let ((this-command "azure-get-user"))
-                       (progn (azure-log this-command "Logged in user: %S" data)
-                              (funcall resolve (assoc :data data))))))
-                  '(("api-version" . "7.0-preview")))))))
+     (azure-get
+      "https://dev.azure.com/{organization}/_apis/connectiondata"
+      (cl-function
+       (lambda (&key data &allow-other-keys)
+         (funcall resolve (cdr (assoc 'authenticatedUser data)))))
+      '(("api-version" . "7.0-preview"))))))
+
+(defun azure-get-current-user ()
+  "Return the display name of the currently logged-in user."
+  (promise-then
+   (azure-get-current-user-identity)
+   (lambda (identity)
+     (let ((user (or (cdr (assoc 'providerDisplayName identity))
+                     (cdr (assoc 'customDisplayName identity)))))
+       (azure-log "azure-get-user" "Logged in user: %S" user)
+       user))))
+
+(defun azure-get-current-user-assignment ()
+  "Return an Azure identity suitable for a work item's Assigned To field."
+  (promise-then
+   (azure-get-current-user-identity)
+   (lambda (identity)
+     (or (azure--current-user-assignment identity)
+         (error "Azure did not return an identity for the current user")))))
 
 ;; [[https://docs.microsoft.com/en-us/rest/api/azure/devops/core/projects/list][Projects]]
 
@@ -525,6 +559,7 @@ not merely the identity's display name."
       (add-dir-local-variable nil 'azure-organization azure-organization)
       (add-dir-local-variable nil 'azure-project azure-project)
       (add-dir-local-variable nil 'azure-team azure-team)
+      (add-dir-local-variable nil 'azure--user azure--user)
       (save-buffer))))
 
 (async-defun azure--set-user ()
@@ -532,7 +567,8 @@ not merely the identity's display name."
   (when (eq azure--user nil)
     (let ((user (await (azure-get-current-user))))
       (azure-log this-command "Logged in as: %S" user)
-      (setq-default azure--user user))))
+      (setq-default azure--user user)
+      (setq azure--user user))))
 
 (async-defun azure-init ()
   "Set required fields and add our cache-directory to the org-agenda.
@@ -548,8 +584,8 @@ not merely the identity's display name."
     (await (azure-select-project)))
   (when (eq azure-team nil)
     (await (azure-select-team)))
+  (await (azure--set-user))
   (azure--save-dir-locals)
-  (azure--set-user)
   (make-directory azure-cache-directory 'make-parents)
   (add-to-list 'org-agenda-files azure-cache-directory))
 

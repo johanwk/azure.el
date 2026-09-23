@@ -9,7 +9,8 @@ ORG_FILES := azure.org azure-devops.org azure-devops-outline.org
 EVIL_ORG_FILE = $(shell $(EMACS) -Q --batch \
   --eval "(progn (require 'package) (package-initialize) (when (locate-library \"evil\") (princ \"azure-evil.org\")))")
 TANGLE_ORG_FILES = $(ORG_FILES) $(EVIL_ORG_FILE)
-TEST_FILES := $(sort $(wildcard tests/*-test.el))
+# Discover tests recursively so adding a test file never requires updating this file.
+TEST_FILES := $(sort $(shell find tests -type f -name '*-test.el' -print))
 TEST_LOAD_ARGS := $(foreach file,$(TEST_FILES),--load $(file))
 export TEST
 
@@ -52,7 +53,7 @@ test: tangle ## Tangle, then run all ERT tests, or those matching TEST=REGEXP.
 	  $(TEST_LOAD_ARGS) \
 	  --eval "(ert-run-tests-batch-and-exit (let ((regexp (getenv \"TEST\"))) (if (and regexp (> (length regexp) 0)) regexp t)))"
 
-list-tests: tangle ## Tangle, then list all available ERT tests.
+list-tests: ## List all available ERT tests without tangling sources.
 	@$(EMACS) -Q --batch \
 	  --eval "(progn (require 'package) (package-initialize) (setq load-prefer-newer t))" \
 	  -L . -L tests \

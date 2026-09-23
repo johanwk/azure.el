@@ -578,8 +578,15 @@
   (let ((azure-organization "Example")
         (azure-project "Project")
         (azure-team "Team")
+        (azure--user "Ada Lovelace")
         captured-url captured-data)
-    (cl-letf (((symbol-function 'azure-post)
+    (cl-letf (((symbol-function 'azure-get-current-user-assignment)
+               (lambda () 'identity-promise))
+              ((symbol-function 'promise-then)
+               (lambda (promise callback)
+                 (should (eq promise 'identity-promise))
+                 (funcall callback "ada@example.com")))
+              ((symbol-function 'azure-post)
                (lambda (url _success &optional data _params _headers _error)
                  (setq captured-url url
                        captured-data data))))
@@ -587,7 +594,12 @@
       (should (string-suffix-p "/$User%20Story" captured-url))
       (should (equal (cdr (assoc "value" (car captured-data)))
                      "New story"))
-      (let* ((relation-operation (cadr captured-data))
+      (should (equal (cadr captured-data)
+                     '(("op" . "add")
+                       ("path" . "/fields/System.AssignedTo")
+                       ("from")
+                       ("value" . "ada@example.com"))))
+      (let* ((relation-operation (nth 2 captured-data))
              (relation (cdr (assoc "value" relation-operation))))
         (should (equal (cdr (assoc "path" relation-operation))
                        "/relations/-"))
@@ -686,7 +698,7 @@
 (ert-deftest azure-devops-update-title-description-and-state-sends-json-patch ()
   (with-temp-buffer
     (org-mode)
-    (insert ":PROPERTIES:\n:ID: 42\n:REV: 7\n:STATE: New\n:END:\n"
+    (insert ":PROPERTIES:\n:ID: 42\n:REV: 7\n:STATE: New\n:ASSIGNEE: Ada Lovelace\n:END:\n"
             "#+TODO: NEW ACTIVE | RESOLVED CLOSED REMOVED\n\n"
             "* ACTIVE Updated task title\n"
             "Updated *description*.\n\n"
@@ -722,6 +734,9 @@
             (("op" . "add")
              ("path" . "/fields/System.Description")
              ("value" . "<p>Updated <strong>description</strong>.</p>"))
+            (("op" . "add")
+             ("path" . "/fields/System.AssignedTo")
+             ("value" . "Ada Lovelace"))
             (("op" . "add")
              ("path" . "/fields/System.State")
              ("value" . "Active")))))
