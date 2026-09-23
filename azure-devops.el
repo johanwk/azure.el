@@ -1334,7 +1334,21 @@ and links are untouched."
                        "")))))
        '(("api-version" . "7.1"))
        patch
-       '(("Content-Type" . "application/json-patch+json"))))))
+       '(("Content-Type" . "application/json-patch+json"))
+       (cl-function
+        (lambda (&rest args &key response error-thrown &allow-other-keys)
+          (let ((this-command "azure-devops--work-item-push-err")
+                (status (and response (request-response-status-code response))))
+            (azure-log this-command "Arguments when error occurred: %s" args)
+            (if (memq status '(409 412))
+                (if (yes-or-no-p
+                     (format "Work item %d has changed on the server (local revision %d is stale).  Refresh the buffer?  Local changes will be LOST! "
+                             id revision))
+                    (azure-devops--update-work-item-buffer id)
+                  (user-error
+                   "Work item %d not pushed; refresh with `azure-devops-work-item' before pushing again"
+                   id))
+              (error "%s" error-thrown)))))))))
 
 ;; We retrieve all the information needed first and if that succeeds,
 ;; we replace everything in our local copy of the issue with what we

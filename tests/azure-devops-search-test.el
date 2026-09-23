@@ -596,7 +596,7 @@
                    (should (equal description "Updated *description*."))
                    "<p>Updated <strong>description</strong>.</p>"))
                 ((symbol-function 'azure-req)
-                 (lambda (method api success params data headers)
+                 (lambda (method api success params data headers &optional _error-handler)
                    (setq captured
                          (list method api params data headers))
                    (funcall success :data '((rev . 8)))
@@ -638,7 +638,7 @@
           captured)
       (cl-letf (((symbol-function 'azure--org-to-html) #'identity)
                 ((symbol-function 'azure-req)
-                 (lambda (_method _api success _params data _headers)
+                 (lambda (_method _api success _params data _headers &optional _error-handler)
                    (setq captured data)
                    (funcall success :data '((rev . 8)))
                    'request)))
