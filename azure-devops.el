@@ -757,6 +757,20 @@ See the Azure DevOps documentation for the work-item search-results API."
    (file-expand-wildcards
     (expand-file-name (format "%d-*.org" id) azure-cache-directory))))
 
+(defun azure-devops--create-work-item-file (id)
+  "Create and return the buffer for a new work-item file with ID.
+Visit the file before initializing its contents so Emacs applies the
+directory-local variables belonging to `azure-cache-directory'."
+  (let* ((new-name (format "%d-Not-yet-updated.org" id))
+         (path (expand-file-name new-name azure-cache-directory))
+         (buf (find-file-noselect path)))
+    (azure-log "azure-devops--create-or-flush-work-item-buffer"
+               "Creating a new work-item file named: %S" new-name)
+    (with-current-buffer buf
+      (insert "\n\n* Personal Notes\n")
+      (save-buffer))
+    buf))
+
 (defun azure-devops--create-or-flush-work-item-buffer (id)
   "Open the file for work item ID and update its content.
 If the file does not exist, create it."
@@ -766,14 +780,7 @@ If the file does not exist, create it."
            (check-point (point-min))
            (this-command "azure-devops--create-or-flush-work-item-buffer"))
        (when (eq (azure-devops-work-item-file id) nil)
-         (let* ((new-name (format "%d-Not-yet-updated.org" id))
-                (buf (generate-new-buffer new-name)))
-           (azure-log this-command "Creating a new work-item file named: %S" new-name)
-           (save-excursion
-             (with-current-buffer buf
-               (org-mode)
-               (insert "\n\n* Personal Notes\n")
-               (write-file (expand-file-name new-name azure-cache-directory))))))
+         (azure-devops--create-work-item-file id))
        (azure-log this-command "Open file on disk, regardless if it’s new or old")
        (find-file (azure-devops-work-item-file id))
        (with-current-buffer (current-buffer)
@@ -1440,6 +1447,37 @@ See the Azure DevOps documentation for the work-items Get API."
   (interactive (list (azure-devops--read-work-item-id)))
   (azure-log this-command "Show work-item with id: %S" id)
   (funcall 'azure-devops--update-work-item-buffer id))
+
+(defun azure-devops--work-item-id-at-point ()
+  "Return the Azure work-item ID in the current context, or nil.
+
+In an `*Azure work items' buffer, use AZURE_ID on the heading at point.
+In another Org buffer, use the document's id property."
+  (when (derived-mode-p 'org-mode)
+    (let ((id
+           (if (string-prefix-p "*Azure work items" (buffer-name))
+               (save-excursion
+                 (unless (org-before-first-heading-p)
+                   (org-back-to-heading t)
+                   (org-entry-get nil "AZURE_ID" nil)))
+             (azure-devops--document-property "id"))))
+      (when (and id (string-match-p "\\`[0-9]+\\'" id))
+        (string-to-number id)))))
+
+;;;###autoload
+(defun azure-devops-pull-work-item-changes (&optional id)
+  "Pull work-item ID from Azure DevOps and refresh its local task file.
+
+Interactively, use the current task document's id property, or AZURE_ID on
+the current heading in an `*Azure work items' buffer.  If neither context
+provides an ID, select a work item with completion."
+  (interactive)
+  (unless (azure--valid-p)
+    (user-error "You need to run `azure-init` first!"))
+  (azure-devops-work-item
+   (or id
+       (azure-devops--work-item-id-at-point)
+       (azure-devops--read-work-item-id))))
 
 ;; [[https://docs.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create][Create]]
 

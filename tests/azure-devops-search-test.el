@@ -481,6 +481,49 @@
     (should (equal prompted '("Bug" "User Story")))
     (should (equal created '("User Story" "New story" 42)))))
 
+(ert-deftest azure-devops-pull-id-from-work-item-document ()
+  (with-temp-buffer
+    (org-mode)
+    (insert ":PROPERTIES:\n:ID: 796818\n:END:\n\n* Task\n")
+    (should (= (azure-devops--work-item-id-at-point) 796818))))
+
+(ert-deftest azure-devops-pull-id-from-outline-heading ()
+  (with-temp-buffer
+    (rename-buffer "*Azure work items: Project*" t)
+    (org-mode)
+    (insert "* Project\n** NEW Task\n:PROPERTIES:\n:AZURE_ID: 798412\n:END:\n")
+    (goto-char (point-max))
+    (should (= (azure-devops--work-item-id-at-point) 798412))))
+
+(ert-deftest azure-devops-pull-falls-back-to-completion ()
+  (with-temp-buffer
+    (org-mode)
+    (let ((azure-organization "Example")
+          (azure-project "Project")
+          (azure-team "Team")
+          selected)
+      (cl-letf (((symbol-function 'azure-devops--read-work-item-id)
+                 (lambda () 42))
+                ((symbol-function 'azure-devops-work-item)
+                 (lambda (id) (setq selected id))))
+        (azure-devops-pull-work-item-changes)
+        (should (= selected 42))))))
+
+(ert-deftest azure-devops-pull-prefers-context-id ()
+  (with-temp-buffer
+    (org-mode)
+    (insert ":PROPERTIES:\n:ID: 796818\n:END:\n\n* Task\n")
+    (let ((azure-organization "Example")
+          (azure-project "Project")
+          (azure-team "Team")
+          selected)
+      (cl-letf (((symbol-function 'azure-devops--read-work-item-id)
+                 (lambda () (ert-fail "Should not prompt when an ID is present")))
+                ((symbol-function 'azure-devops-work-item)
+                 (lambda (id) (setq selected id))))
+        (azure-devops-pull-work-item-changes)
+        (should (= selected 796818))))))
+
 (ert-deftest azure-devops-create-parent-id-from-work-item-document ()
   (with-temp-buffer
     (org-mode)
@@ -509,6 +552,27 @@
                     42 "Parent: "))
               "42")))
     (should (string-match-p "Parent.*#42" default))))
+
+(defvar azure-devops-test-directory-value nil)
+
+(ert-deftest azure-devops-new-work-item-inherits-directory-local-variables ()
+  (let ((directory (make-temp-file "azure-work-item-" t))
+        buffer)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name ".dir-locals.el" directory)
+            (prin1 '((nil . ((azure-devops-test-directory-value . inherited))))
+                   (current-buffer)))
+          (let ((azure-cache-directory directory)
+                (enable-local-variables :all))
+            (setq buffer (azure-devops--create-work-item-file 42)))
+          (with-current-buffer buffer
+            (should (eq azure-devops-test-directory-value 'inherited))
+            (should (derived-mode-p 'org-mode))
+            (should (equal (buffer-string) "\n\n* Personal Notes\n"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (delete-directory directory t))))
 
 (ert-deftest azure-devops-create-encodes-work-item-type ()
   (let ((azure-organization "Example")
