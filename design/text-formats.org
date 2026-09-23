@@ -1,0 +1,214 @@
+#+title: Briefing: Azure DevOps rich-text formats
+
+* Decision for now
+
+Keep HTML as the Azure DevOps interchange format.  The existing implementation
+works, and adding first-class support for multiple server-side text formats is a
+larger compatibility and data-integrity change than it initially appears.
+
+No production behavior is changed by this note.
+
+* Current behavior
+
+The package presents work-item text as Org while using HTML at the Azure
+boundary:
+
+- Work-item descriptions and reproduction steps are read as HTML and converted
+  from HTML to Org with Pandoc.
+- Discussion comments are also treated as HTML and converted to Org.
+- When a description is pushed, its Org source is converted to HTML and written
+  to =System.Description=.
+- Pandoc is invoked without a shell and with =--wrap=none=.  Imported Org is
+  subsequently cleaned to normalize newlines and non-breaking spaces, remove
+  unwanted control characters, and discard Pandoc hard-line-break artifacts.
+- Comments are currently displayed but are not pushed by the description update
+  command.
+
+The relevant conversion functions are =azure--html-to-org= and
+=azure--org-to-html= in =azure.el=.  Their callers are in =azure-devops.el=.
+
+This arrangement has one clear invariant: local editable content is Org, and
+remote rich text is HTML.
+
+* Why “support Markdown” is not a small converter change
+
+Azure DevOps can expose multiline content associated with different formatting
+conventions, depending on the field, process, organization features, editor,
+and API operation.  Descriptions, reproduction steps, and comments should not
+be assumed to have identical rules.  A value's text alone is not a safe format
+detector: valid Markdown can contain HTML, plain text can contain angle
+brackets, and HTML can look like ordinary text.
+
+Changing =html= to =markdown= in the Pandoc call would therefore be
+insufficient.  A robust implementation must answer all of the following:
+
+1. How is the authoritative format discovered for each returned field or
+   comment?
+2. How is the desired format declared when creating or updating it?
+3. Does Azure preserve the selected format, or normalize it on read/write?
+4. What should happen when format metadata is absent, unknown, or inconsistent
+   with the payload?
+5. Can an update silently change an existing field's format and thereby damage
+   rendering?
+6. Which Org constructs survive round trips through each format?
+
+The exact REST contract and behavior must be verified against the Azure DevOps
+version in use before implementation.  In particular, do not infer a format
+solely from the current web editor or from payload contents.
+
+* Formats and trade-offs
+
+** HTML
+
+Advantages:
+
+- Matches the package's established and tested path.
+- Represents Azure rich-text features directly.
+- Pandoc provides a practical HTML-to-Org and Org-to-HTML bridge.
+- Avoids an immediate migration of existing work-item content.
+
+Costs and risks:
+
+- Generated HTML may differ structurally from Azure-generated HTML even when it
+  renders the same.
+- Some Azure-specific styling, attributes, mentions, links, tables, or embedded
+  objects may be lost or rewritten by conversion.
+- HTML from Azure must be treated as untrusted content outside the text-only
+  conversion path.
+
+** Markdown
+
+Advantages:
+
+- Easier for humans and text tools to inspect than HTML.
+- Potentially produces smaller, cleaner remote payloads.
+- Maps naturally to many common Org constructs.
+
+Costs and risks:
+
+- Azure's accepted Markdown and Pandoc's Markdown are not necessarily the same
+  dialect.
+- Tables, nested lists, checkboxes, line breaks, code blocks, mentions,
+  attachments, and Azure-specific links require explicit compatibility tests.
+- Existing HTML-backed items need a policy: preserve their format, convert on
+  edit, or migrate explicitly.
+- Format metadata may need to be retrieved and supplied separately from the
+  field value.
+
+** Plain text
+
+Advantages:
+
+- Smallest and safest common denominator.
+- Predictable when formatting is genuinely unnecessary.
+
+Costs and risks:
+
+- Loses structure and rich links.
+- Org markup would become visible text unless stripped.
+- It is unsuitable as an automatic fallback for content that was previously
+  rich text.
+
+** Org
+
+Org should remain the local authoring/storage format.  Azure DevOps does not
+provide a native Org work-item format, so Org must be converted at the service
+boundary.  Sending Org syntax as Markdown or plain text would not preserve its
+semantics reliably.
+
+* Recommended future design
+
+Treat format as explicit metadata, separate from content.
+
+1. Introduce an internal representation such as =(:text TEXT :format FORMAT)=,
+   where =FORMAT= is one of =html=, =markdown=, =plain=, or =unknown=.
+2. Resolve format per field and per comment using documented API metadata or a
+   verified endpoint contract.  Do not use content sniffing except, perhaps,
+   as an opt-in diagnostic.
+3. Dispatch imports through one function, conceptually
+   =azure--remote-text-to-org=, and exports through
+   =azure--org-to-remote-text=.
+4. Preserve the existing remote format by default when updating an item.
+   Choosing a different format should be explicit and should warn if it implies
+   conversion.
+5. Keep HTML as the fallback only where the current API contract already
+   establishes HTML.  For genuinely unknown formats, fail safely rather than
+   writing a potentially destructive update.
+6. Handle descriptions, reproduction steps, and comments independently.  Do
+   not generalize from one surface to all multiline text.
+7. Record enough format information locally to make a later push deterministic,
+   if Azure does not return it with every fetch.  Any local property name and
+   persistence policy should be designed before changing file syntax.
+
+A configurable policy could eventually offer:
+
+- =preserve=: write in the format fetched from Azure (recommended default),
+- =html=: always export HTML for newly created content,
+- =markdown=: use Markdown only where the API explicitly supports it, and
+- =read-only=: import an unsupported format but refuse to overwrite it.
+
+* Compatibility and migration
+
+There should be no automatic bulk migration.  Existing HTML items should remain
+HTML unless a user deliberately converts them.  Mixed-format projects and even
+mixed-format fields within one work item should be expected.
+
+If local files gain format metadata, old files without it must continue to use
+the present HTML behavior.  This gives a backwards-compatible upgrade path and
+prevents a package update from changing remote rendering.
+
+Round trips are inherently lossy in some cases.  Preserve the original remote
+text where practical and avoid sending an update when the logical Org content
+has not changed.  A preview or diff of the outgoing representation would be
+valuable before format conversion or migration.
+
+* Test and investigation plan
+
+Before coding:
+
+1. Confirm, from current Azure DevOps REST documentation and live responses,
+   how multiline-field and comment formats are reported and selected.
+2. Capture fixtures for HTML, Markdown, plain text, absent metadata, and unknown
+   metadata.
+3. Test each relevant surface: description, reproduction steps, and comments.
+4. Build a round-trip corpus containing headings, paragraphs, emphasis, literal
+   characters, links, lists, tables, code, hard line breaks, Unicode, mentions,
+   and attachments.
+5. Verify create, fetch, update, unchanged update, and stale-revision behavior.
+6. Verify that switching formats cannot occur accidentally.
+7. Test missing Pandoc, conversion failures, and malformed remote content.
+
+Acceptance criteria should focus on preserved meaning and rendering, not byte-
+for-byte equality of generated markup.
+
+* Suggested implementation phases
+
+1. *Research only:* document the actual API contracts and collect fixtures.
+2. *Refactor without behavior change:* centralize remote-text conversion while
+   retaining HTML everywhere.
+3. *Read support:* import explicitly identified Markdown/plain text, with
+   unknown formats handled safely.
+4. *Write support:* preserve the fetched format and add focused tests.
+5. *Optional author preference:* permit an explicit default for new content.
+6. *Optional migration tooling:* provide preview, confirmation, and rollback;
+   never migrate implicitly during an ordinary update.
+
+* Risks to keep visible
+
+- Silent formatting loss is more serious than a visible conversion error.
+- Field definitions and capabilities may differ between inherited/custom
+  processes and Azure DevOps Services/Server versions.
+- Comments may use a different API and rendering pipeline from work-item fields.
+- Markdown dialect mismatch can produce content that is valid but renders
+  differently.
+- Converting on every synchronization can create noisy diffs and markup churn.
+- Format metadata cached in an Org file can become stale after a remote edit.
+
+* Summary
+
+HTML remains the appropriate choice now because it is the known, working
+contract in this package.  Supporting other formats later should be approached
+as explicit per-value format negotiation and preservation—not as a global
+Pandoc input/output switch.  The safest route is research, a behavior-neutral
+conversion refactor, read support, then guarded write support, with no automatic
+migration of existing work items.
